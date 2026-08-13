@@ -2,6 +2,8 @@ from pydantic import BaseModel, model_validator, Field, PrivateAttr
 import re
 from typing import ClassVar
 
+
+## TODO Capire come gestire i token speciali
 class CustomTokenizer(BaseModel):
     SPLIT_REGEX: ClassVar[re.Pattern] = re.compile(
         r"""'s|'t|'re|'ve|'m|'ll|'d|\s?[^\W\d_]+|\s?\d+|\s?[^\s\w]+|\s+(?!\S)|\s+""",
@@ -11,16 +13,33 @@ class CustomTokenizer(BaseModel):
     dict_merge: dict[tuple[str, str], int]
     _id_token: dict[int, str] = PrivateAttr(default_factory=dict)
     _byte_encoder: dict[int, str] = PrivateAttr(default_factory=dict)
-    _byte_decoder: dict[str, int] = PrivateAttr(default_factory=dict)    
+    _byte_decoder: dict[str, int] = PrivateAttr(default_factory=dict)
+    trie_token: dict = PrivateAttr(default_factory=dict)
 
-    def model_post_init(self, __contex) -> None:
+    def model_post_init(self, __context) -> None:
         self._id_token = {id_: token for token, id_ in self.token_id.items()}
         self._byte_encoder = self._bytes_to_unicode()
         self._byte_decoder = {v: k for k, v in self._byte_encoder.items()}
+        self.trie_token = self._init_trie()
 
     @property
     def id_token(self):
         return self._id_token
+
+    def _init_trie(self):
+        trie: dict = {}
+        for id_ in self._id_token:
+            try:
+                decoded = self.decode(id_)
+            except (KeyError, UnicodeDecodeError):
+                continue
+            if not decoded or "\ufffd" in decoded:
+                continue
+            node = trie
+            for char in decoded:
+                node = node.setdefault(char, {})
+            node.setdefault(None, []).append(id_)
+        return trie
 
     def _bytes_to_unicode(self):
         tokens = (
