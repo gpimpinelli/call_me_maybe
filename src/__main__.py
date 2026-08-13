@@ -2,11 +2,10 @@ from typing import Any
 import sys
 import json
 import argparse
-from .custom_tokenizer import CustomTokenizer
 
 try:
+    from .custom_tokenizer import CustomTokenizer
     from llm_sdk.llm_sdk import Small_LLM_Model
-
 except Exception as e:
     print(f"Impossible load module llm_sdk: {e}")
 
@@ -67,9 +66,7 @@ def main():
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
-    tokenizer = CustomTokenizer(token_id=json_vocab)
-    print(tokenizer.decode(1879))
-    print(model.decode(1879))
+
 
 if __name__ == "__main__":
     try:
