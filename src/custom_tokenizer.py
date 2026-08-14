@@ -1,34 +1,61 @@
-from pydantic import BaseModel, model_validator, Field, PrivateAttr
+from pydantic import BaseModel, Field, model_validator, PrivateAttr
 import re
+from typing import Any
 from typing import ClassVar
 
 
-## TODO Capire come gestire i token speciali
 class CustomTokenizer(BaseModel):
+    ## Per bonus capire come fare un traduttore di regex
     SPLIT_REGEX: ClassVar[re.Pattern] = re.compile(
-        r"""'s|'t|'re|'ve|'m|'ll|'d|\s?[^\W\d_]+|\s?\d+|\s?[^\s\w]+|\s+(?!\S)|\s+""",
-        re.VERBOSE
+    r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)"""
+    r"""|[^\r\n\w]?[^\W\d_]+"""
+    r"""|\d"""
+    r"""| ?[^\s\w]+[\r\n]*"""
+    r"""|\s*[\r\n]+"""
+    r"""|\s+(?!\S)"""
+    r"""|\s+""",
+    re.VERBOSE
     )
     token_id: dict[str, int]
     dict_merge: dict[tuple[str, str], int]
+    special_token_id: dict[str, Any]
     _id_token: dict[int, str] = PrivateAttr(default_factory=dict)
+    _special_id_token: dict[int, Any] = PrivateAttr(default_factory=dict)
     _byte_encoder: dict[int, str] = PrivateAttr(default_factory=dict)
     _byte_decoder: dict[str, int] = PrivateAttr(default_factory=dict)
-    trie_token: dict = PrivateAttr(default_factory=dict)
+    
+    trie_token: dict = Field(default_factory=dict)
+            
+    @model_validator(mode='before')
+    @classmethod
+    def filter_special_token(cls, data):
+        if isinstance(data, dict):
+            special_token_id = data.get('special_token_id', None)
+            if special_token_id:
+                special_token_id = {token['content']: token['id'] for token in special_token_id}
+                data['special_token_id'] = special_token_id
+        return data
 
     def model_post_init(self, __context) -> None:
         self._id_token = {id_: token for token, id_ in self.token_id.items()}
         self._byte_encoder = self._bytes_to_unicode()
         self._byte_decoder = {v: k for k, v in self._byte_encoder.items()}
+        self._special_id_token = {v: k for k, v in self.special_token_id.items()}
         self.trie_token = self._init_trie()
 
     @property
     def id_token(self):
         return self._id_token
 
+    @property
+    def special_id_token(self):
+        return self._special_id_token
+
     def _init_trie(self):
         trie: dict = {}
         for id_ in self._id_token:
+            if id_ in self.special_id_token:
+                continue
             try:
                 decoded = self.decode(id_)
             except (KeyError, UnicodeDecodeError):
