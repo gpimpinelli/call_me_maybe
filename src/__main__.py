@@ -66,11 +66,8 @@ def main():
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
-    print(json_tokenizer.keys())
-    print(json_tokenizer['pre_tokenizer'])
-    #tokenizer = CustomTokenizer(token_id=json_vocab,dict_merge=dict_merge, special_token_id=json_tokenizer['added_tokens'])
-    #print(tokenizer.special_token_id)
-    #print(tokenizer.special_id_token)
+    tokenizer = CustomTokenizer(token_id=json_vocab,dict_merge=dict_merge, special_token_id=json_tokenizer['added_tokens'])
+    
 
 if __name__ == "__main__":
     try:
