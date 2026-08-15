@@ -23,7 +23,7 @@ class CustomTokenizer(BaseModel):
     _byte_encoder: dict[int, str] = PrivateAttr(default_factory=dict)
     _byte_decoder: dict[str, int] = PrivateAttr(default_factory=dict)
     _special_split_regex: re.Pattern | None = PrivateAttr(default=None)
-    trie_token: dict = Field(default_factory=dict)
+    trie_token: dict[str, Any] = Field(default_factory=dict)
             
     @model_validator(mode='before')
     @classmethod
