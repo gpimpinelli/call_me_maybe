@@ -1,7 +1,6 @@
 from pydantic import BaseModel, Field, model_validator, PrivateAttr
 import re
-from typing import Any
-from typing import ClassVar
+from typing import Any, ClassVar
 
 
 class CustomTokenizer(BaseModel):
