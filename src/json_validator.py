@@ -27,12 +27,8 @@ class JsonValidator(BaseModel):
     } - {'"', "\\"}
 
     text: str
-    _status: State = State.START
+    _status: State = PrivateAttr(default=State.START)
     _stack: list[str] = PrivateAttr(default_factory=list)
-
-
-    def model_post_init(self, __context) -> None:
-        self.size = len(self.text)
 
     def _handle_string(self, i: int, text: str, next_state: State) -> tuple[int, State]:
         while i < len(text):
@@ -90,6 +86,8 @@ class JsonValidator(BaseModel):
                 return (i, State.IN_NUMBER)
             while i < size and text[i] in self._DIGITS:
                 i += 1
+        if i == size:
+            return (i, State.IN_NUMBER)
         return (i, next_state)
 
     def _handle_special(self, i: int, text: str, next_state: State) -> tuple[int, State]:
@@ -245,8 +243,8 @@ class JsonValidator(BaseModel):
         stack: list[str] | None = None
         ) -> set[str]:
 
-        status = status if status is None else self._status
-        stack = stack if stack is None else self.stack
+        status = self._status if status is None else status
+        stack = self._stack if stack is None else stack
         
         match status:
             case State.START:
