@@ -27,14 +27,14 @@ class JsonValidator(BaseModel):
     } - {'"', "\\"}
 
     text: str
-    status: State = State.START
+    _status: State = State.START
     _stack: list[str] = PrivateAttr(default_factory=list)
 
 
     def model_post_init(self, __context) -> None:
         self.size = len(self.text)
 
-    def _handle_string(self, text: str, i: int, next_state: State) -> tuple[int, State]:
+    def _handle_string(self, i: int, text: str, next_state: State) -> tuple[int, State]:
         while i < len(text):
             if text[i] == "\"":
                 return i + 1, next_state
@@ -207,7 +207,7 @@ class JsonValidator(BaseModel):
                 if text[i] in "]}" and stack:
                     if self._MAP_BRACKET[text[i]] == stack[-1][0]:
                         stack.pop()
-                        status = self._after_close()
+                        status = self._after_close(stack)
                         i += 1
                     else:
                         status = State.BAD
@@ -232,7 +232,7 @@ class JsonValidator(BaseModel):
 
     def validate(self) -> State:
         status, stack, _ = self._run(self.text)
-        self.status = status
+        self._status = status
         self._stack = stack
         return status
 
@@ -245,8 +245,8 @@ class JsonValidator(BaseModel):
         stack: list[str] | None = None
         ) -> set[str]:
 
-        status = status if status is None else status
-        stack = stack if stack is None else stack
+        status = status if status is None else self._status
+        stack = stack if stack is None else self.stack
         
         match status:
             case State.START:
@@ -289,15 +289,7 @@ class JsonValidator(BaseModel):
             case _:
                 return set()
 
-    def is_valid_continuation(
-        self,
-        token_str: str,
-        status: State,
-        stack: list[str]
-        ) -> tuple[State, list[str]] | None:
-        
-        new_status, next_stack, _ = self._run(token_str, status, list(stack))
-        if new_status == State.BAD:
-            return None
-        return (new_status, next_stack)
-
+    def is_valid_continuation(self, token_str: str) -> bool:
+        candidate = self.text + token_str
+        new_status, _, _ = self._run(candidate)
+        return new_status != State.BAD
