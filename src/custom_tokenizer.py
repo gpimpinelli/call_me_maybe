@@ -14,7 +14,7 @@ class CustomTokenizer(BaseModel):
     r"""|\s+(?!\S)"""
     r"""|\s+""",
     re.VERBOSE
-)
+    )
     token_id: dict[str, int]
     dict_merge: dict[tuple[str, str], int]
     special_token_id: dict[str, Any]

@@ -30,7 +30,6 @@ class JsonValidator(BaseModel):
     _status: State = PrivateAttr(default=State.START)
     _stack: list[str] = PrivateAttr(default_factory=list)
     _key_stack: list[str | None] = PrivateAttr(default_factory=list)
-    _key_value: str = PrivateAttr(default_factory=str)
 
     def _handle_string(self, i: int, text: str, next_state: State) -> tuple[int, State]:
         while i < len(text):
@@ -114,7 +113,7 @@ class JsonValidator(BaseModel):
         stack: list[str] | None = None,
         key_stack: list[str | None] | None = None,
         start: int=0
-        ) -> tuple[State, list[str], int]:
+        ) -> tuple[State, list[str], list[str | None], int]:
         i = start
         size = len(text)
         if stack is None:
