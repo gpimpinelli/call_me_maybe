@@ -8,7 +8,7 @@ try:
     from .custom_tokenizer import CustomTokenizer
     from .json_validator import JsonValidator
     from llm_sdk.llm_sdk import Small_LLM_Model
-    from .utils import soft_max, get_logit_max
+    from .utils import soft_max, get_logit_max, build_prompt
     from .schema_aware_validator import SchemaAwareValidator
 except Exception as e:
     print(f"Impossible load module llm_sdk: {e}")
@@ -73,8 +73,17 @@ def main():
         print(f"Error: {e}")
         sys.exit(1)
     tokenizer = CustomTokenizer(token_id=json_vocab,dict_merge=dict_merge, special_token_id=json_tokenizer['added_tokens'])
-    print(schema.name_trie)
-    print(schema.function_by_name)
+    function_txt = json.dumps(schema.json_functions, indent=2)
+    for p in json_prompts:
+        llm_prompt = build_prompt(p['prompt'], function_txt)
+        input_ids = tokenizer.encode(llm_prompt)
+        json_validator = JsonValidator(text='')
+        genetated_ids: list[int] = []
+        MAX_TOKEN = 200
+        while not json_validator.is_complete() and len(genetated_ids) < MAX_TOKEN:
+        
+    #print(schema.name_trie)
+    #print(schema.function_by_name)
    
 
 if __name__ == "__main__":
@@ -84,5 +93,5 @@ if __name__ == "__main__":
         print(f"KeyboardInterrupt: {e}")
     except EOFError as e:
         print(f"EOFError: {e}")
-    except Exception as e:
-        print(f"Error: {e}")
+#    except Exception as e:
+#        print(f"Error: {e}", file=sys.stderr)
