@@ -29,6 +29,8 @@ class JsonValidator(BaseModel):
     text: str
     _status: State = PrivateAttr(default=State.START)
     _stack: list[str] = PrivateAttr(default_factory=list)
+    _key_stack: list[str | None] = PrivateAttr(default_factory=list)
+    _key_value: str = PrivateAttr(default_factory=str)
 
     def _handle_string(self, i: int, text: str, next_state: State) -> tuple[int, State]:
         while i < len(text):
@@ -110,12 +112,15 @@ class JsonValidator(BaseModel):
         text: str,
         status: State=State.START,
         stack: list[str] | None = None,
+        key_stack: list[str | None] | None = None,
         start: int=0
         ) -> tuple[State, list[str], int]:
         i = start
         size = len(text)
         if stack is None:
             stack = []
+        if key_stack is None:
+            key_stack = []
         while i < size:
  
             if text[i] in " \t\n\r" and status not in (State.IN_STRING, State.IN_KEY_STRING):
@@ -129,17 +134,21 @@ class JsonValidator(BaseModel):
                 if text[i] == "{":
                     status = State.EXPECT_KEY_OR_END_OBJ
                     stack.append("{")
+                    key_stack.append(None)
                     i += 1
                 elif text[i] == "[":
                     status = State.EXPECT_VALUE
                     stack.append("[")
+                    key_stack.append(None)
                     i += 1
                 else:
                     status = State.BAD
 
             elif status == State.IN_KEY_STRING:
+                start_key = i
                 i, status = self._handle_string(i, text, State.EXPECT_COLON)
-
+                if status == State.EXPECT_COLON:
+                    key_stack[-1] = text[start_key:i-1]
             elif status == State.EXPECT_COLON:
                 if text[i] != ":":
                     status = State.BAD
@@ -163,15 +172,18 @@ class JsonValidator(BaseModel):
                 elif text[i] == "[":
                     status = State.EXPECT_VALUE
                     stack.append("[")
+                    key_stack.append(None)
                     i += 1
 
                 elif text[i] == "{":
                     status = State.EXPECT_KEY_OR_END_OBJ
                     stack.append("{")
+                    key_stack.append(None)
                     i += 1
 
                 elif allow_close and text[i] == "]":
                     stack.pop()
+                    key_stack.pop()
                     status = self._after_close(stack)
                     i += 1
 
@@ -195,6 +207,7 @@ class JsonValidator(BaseModel):
                 elif text[i] in "}]" and stack and stack[-1] == "{":
                     if self._MAP_BRACKET[text[i]] == stack[-1][0]:
                         stack.pop()
+                        key_stack.pop()
                         status = self._after_close(stack)
                         i += 1
                     else: status = State.BAD
@@ -205,6 +218,7 @@ class JsonValidator(BaseModel):
                 if text[i] in "]}" and stack:
                     if self._MAP_BRACKET[text[i]] == stack[-1][0]:
                         stack.pop()
+                        key_stack.pop()
                         status = self._after_close(stack)
                         i += 1
                     else:
@@ -226,12 +240,18 @@ class JsonValidator(BaseModel):
             
             else:
                 status = State.BAD
-        return status, stack, i
+        return status, stack, key_stack, i
 
     def validate(self) -> State:
-        status, stack, _ = self._run(self.text)
+        status, stack, key_stack, _ = self._run(
+            self.text, 
+            status=self._status, 
+            stack=list(self._stack), 
+            key_stack=list(self._key_stack)
+        )
         self._status = status
         self._stack = stack
+        self._key_stack = key_stack
         return status
 
     def is_complete(self) -> bool:
@@ -289,5 +309,8 @@ class JsonValidator(BaseModel):
 
     def is_valid_continuation(self, token_str: str) -> bool:
         candidate = self.text + token_str
-        new_status, _, _ = self._run(candidate)
+        new_status, _, _, _ = self._run(candidate)
         return new_status != State.BAD
+
+    def current_key_path(self) -> list[str | None]:
+        return list(self._key_stack)
