@@ -11,6 +11,7 @@ debug:
 
 clean:
 	rm -rf */__pycache__ */.mypy_cache data/output/
+	uv cache clean
 
 lint:
 	uv run flake8 .
