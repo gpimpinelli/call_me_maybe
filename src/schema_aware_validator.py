@@ -3,13 +3,21 @@ from pydantic import BaseModel, PrivateAttr
 
 class SchemaAwareValidator(BaseModel):
     json_functions: list[dict]
-    function_by_name: dict[str, dict] = PrivateAttr(default_factory=dict)
-    name_trie: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _function_by_name: dict[str, dict] = PrivateAttr(default_factory=dict)
+    _name_trie: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context):
-        self.function_by_name = {f["name"]: f for f in self.json_functions}
-        self.name_trie = self._init_trie([f["name"] for f in self.json_functions])
+        self._function_by_name = {f["name"]: f for f in self.json_functions}
+        self._name_trie = self._init_trie([f["name"] for f in self.json_functions])
     
+    @property
+    def name_trie(self) -> dict[str, Any]:
+        return self._name_trie
+    
+    @property
+    def function_by_name(self) -> list[str, dict]:
+        return self._function_by_name
+
     def _init_trie(self, words: list[str]):
         trie: dict = {}
         for word in words:

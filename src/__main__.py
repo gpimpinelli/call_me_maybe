@@ -8,7 +8,8 @@ try:
     from .custom_tokenizer import CustomTokenizer
     from .json_validator import JsonValidator
     from llm_sdk.llm_sdk import Small_LLM_Model
-    from .utils import soft_max, get_logit_max, build_system_prompt
+    from .utils import soft_max, get_logit_max
+    from .schema_aware_validator import SchemaAwareValidator
 except Exception as e:
     print(f"Impossible load module llm_sdk: {e}")
 
@@ -66,12 +67,14 @@ def main():
         dict_merge = get_line_from_file(merge_path)
         json_tokenizer = get_json_from_file(tokenizer_path)
         json_vocab = get_json_from_file(vocab_path)
-        json_functions = get_json_from_file(argv.functions_definition)
+        schema = SchemaAwareValidator(json_functions=get_json_from_file(argv.functions_definition))
         json_prompts = get_json_from_file(argv.input)
     except Exception as e:
         print(f"Error: {e}")
         sys.exit(1)
     tokenizer = CustomTokenizer(token_id=json_vocab,dict_merge=dict_merge, special_token_id=json_tokenizer['added_tokens'])
+    print(schema.name_trie)
+    print(schema.function_by_name)
    
 
 if __name__ == "__main__":
