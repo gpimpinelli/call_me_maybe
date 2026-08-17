@@ -5,17 +5,23 @@ class SchemaAwareValidator(BaseModel):
     json_functions: list[dict]
     _function_by_name: dict[str, dict] = PrivateAttr(default_factory=dict)
     _name_trie: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _param_tries: dict[str, dict] = PrivateAttr(default_factory=dict)
+
 
     def model_post_init(self, __context):
         self._function_by_name = {f["name"]: f for f in self.json_functions}
         self._name_trie = self._init_trie([f["name"] for f in self.json_functions])
-    
+        self._param_tries = {
+            name: self._init_trie(list(f.get("parameters", {}).keys()))
+            for name, f in self._function_by_name.items()
+            }
+
     @property
     def name_trie(self) -> dict[str, Any]:
         return self._name_trie
     
     @property
-    def function_by_name(self) -> list[str, dict]:
+    def function_by_name(self) -> dict[str, dict]:
         return self._function_by_name
 
     def _init_trie(self, words: list[str]):
@@ -44,5 +50,4 @@ class SchemaAwareValidator(BaseModel):
         return None in node
 
     def param_trie_for(self, function_name: str) -> dict:
-        params = self.function_by_name.get(function_name, {}).get("parameters", {})
-        return self._init_trie(list(params.keys()))
+        return self.param_trie.get(function_name, {})
