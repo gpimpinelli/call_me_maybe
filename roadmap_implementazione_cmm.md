@@ -1,283 +1,556 @@
-Ecco la roadmap rivista, più leggibile e senza codice (tranne i file di configurazione iniziali). Ho mantenuto la struttura a fasi e ho spiegato ogni passaggio in modo chiaro.
+# 🗺️ Roadmap Completa — Call Me Maybe (con Bonus)
+
+## 📋 Analisi del Progetto
+
+### Obiettivo
+Implementare un sistema di **function calling** su un LLM (Qwen3-0.6B) che:
+1. Riceve prompt in linguaggio naturale
+2. Usa **constrained decoding** token-by-token per garantire output JSON **100% valido**
+3. Seleziona la funzione giusta e ne estrae gli argomenti tipizzati
+
+### Stato Attuale — Cosa È Già Fatto ✅
+
+| File | Stato | Note |
+|------|-------|-------|
+| `src/custom_tokenizer.py` | ✅ Completo | BPE encode/decode custom, trie dei token, gestione special token |
+| `src/json_validator.py` | ✅ Completo | FSM a stati per validazione JSON incrementale, `next_char()`, `is_valid_continuation()` |
+| `src/schema_aware_validator.py` | ⚠️ Parziale | Struttura base OK, `param_trie_for()` usa `self.param_trie` (bug: dovrebbe essere `_param_tries`) |
+| `src/utils.py` | ✅ Completo | `soft_max`, `get_logit_max`, `build_prompt` |
+| `src/__main__.py` | ❌ Incompleto | Carica tutto ma il loop di generazione è mancante — si ferma dopo `function_txt = ...` |
+| `Makefile` | ✅ Completo | Tutte le regole obbligatorie presenti |
+| `pyproject.toml` | ✅ Completo | Dipendenze corrette |
+| `README.md` | ❌ Mancante | Non esiste ancora |
+| `data/output/function_calling_results.json` | ❌ Errato | Output attuale è malformato (nomi funzione senza `_`, valori sbagliati, campi con `:`) |
+
+### Problema Critico nell'Output Attuale
+```json
+// SBAGLIATO — come appare ora:
+{"name": "fnaddnumbers", "parameters": {"a": 2, "b": 3}}  // underscore mancanti
+{"name": ":fngetsquareroot", ":parameters": {"arg1": ":shrek"}}  // coloni errati
+
+// CORRETTO — come deve essere:
+{"prompt": "...", "name": "fn_add_numbers", "parameters": {"a": 2.0, "b": 3.0}}
+```
+Il constrained decoding **non è ancora integrato** nel loop di generazione.
 
 ---
 
-# 🛠️ Roadmap Definitiva – Function Calling con Constrained Decoding
+## 🎯 Regole Fondamentali del Progetto
 
-## Fase 0 – Setup e vincoli
-
-- **Ambiente virtuale e dipendenze**
-  - Inizializza il progetto con `uv init --app`.
-  - Aggiungi `pydantic` e `numpy` con `uv add pydantic numpy`.
-  - Copia la cartella `llm_sdk/` nella root del progetto. Non modificare i file interni.
-
-- **Struttura delle directory**
-  ```
-  progetto/
-  ├── pyproject.toml
-  ├── uv.lock
-  ├── Makefile
-  ├── .gitignore
-  ├── README.md
-  ├── llm_sdk/                # copiato dall'originale
-  ├── src/
-  │   ├── __init__.py
-  │   ├── __main__.py
-  │   ├── models.py
-  │   ├── decoder.py
-  │   ├── grammar.py
-  │   ├── tokenizer_utils.py
-  │   └── utils.py
-  └── data/
-      └── input/
-          ├── functions_definition.json
-          └── function_calling_tests.json
-  ```
-
-- **File di configurazione obbligatori**
-
-  **Makefile** (esattamente come richiesto):
-  ```makefile
-  .PHONY: install run debug clean lint lint-strict
-
-  install:
-  	uv sync
-
-  run:
-  	uv run python -m src
-
-  debug:
-  	uv run python -m pdb -m src
-
-  clean:
-  	rm -rf __pycache__ .mypy_cache data/output/
-
-  lint:
-  	flake8 .
-  	mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs
-
-  lint-strict:
-  	flake8 .
-  	mypy . --strict
-  ```
-
-  **pyproject.toml** (minimale, dopo aver aggiunto le dipendenze):
-  ```toml
-  [project]
-  name = "call-me-maybe"
-  version = "0.1.0"
-  description = "Function calling with constrained decoding"
-  requires-python = ">=3.10"
-  dependencies = [
-      "numpy>=1.24",
-      "pydantic>=2.0",
-  ]
-  ```
-
-  **.gitignore**:
-  ```
-  __pycache__/
-  .mypy_cache/
-  .venv/
-  data/output/
-  ```
-
-- **Verifica iniziale**
-  - Crea un `__main__.py` temporaneo che importa `Small_LLM_Model` per accertarti che il percorso funzioni.
+| Regola | Dettaglio |
+|--------|-----------|
+| **Linguaggio** | Python 3.10+ |
+| **Stile** | flake8 + mypy (no `--strict` obbligatorio, ma raccomandato) |
+| **Pydantic** | Tutte le classi DEVONO usare pydantic |
+| **Dipendenze permesse** | `numpy`, `json`, `pydantic` |
+| **Dipendenze vietate** | `dspy`, `pytorch` (uso diretto), `transformers` (uso diretto), `outlines` |
+| **Modello** | `Qwen/Qwen3-0.6B` (default obbligatorio) |
+| **Accesso SDK** | Solo metodi pubblici: `get_logits_from_input_ids`, `get_path_to_vocab_file`, `encode`, `decode` (opz.) |
+| **Selezione funzione** | Tramite LLM, NON con euristiche/regex/keyword matching |
+| **Output JSON** | 100% valido, sempre parseable, conforme allo schema |
+| **Comando run** | `uv run python -m src [--functions_definition ...] [--input ...] [--output ...]` |
 
 ---
 
-## Fase 1 – Esplorazione del modello e del vocabolario
-
-- **Carica il modello**  
-  Crea un’istanza di `Small_LLM_Model()` per avere accesso ai metodi dell’SDK.
-
-- **Vocabolario**  
-  - Chiama `get_path_to_vocab_file()` e carica il JSON.  
-  - Costruisci due mappe: `token → id` e `id → token`.  
-  - Analizza la dimensione e l’aspetto dei token (molti hanno uno spazio iniziale rappresentato da `Ġ`).  
-  - Annota i token speciali (fine testo, padding, ecc.).
-
-- **Test di generazione libera**  
-  - Tokenizza un prompt di esempio con `encode()`.  
-  - Per un certo numero di passi, chiama `get_logits_from_input_ids()` e prendi il token con logit massimo (greedy).  
-  - Decodifica i token per vedere il testo generato.  
-  - Prova a far generare un JSON con un prompt: osserva come il modello spesso sbagli virgolette, virgole, parentesi. Questo conferma la necessità del constrained decoding.
-
-- **Obiettivo di questa fase**  
-  Avere familiarità con i metodi dell’SDK, la struttura dei logits e il formato dei token.
+## 🚀 Roadmap Dettagliata
 
 ---
 
-## Fase 2 – Motore di Constrained Decoding (il cuore del progetto)
+### FASE 1 — Fix Bug Critici (⏱ ~30 min)
 
-L’obiettivo è costruire un sistema che genera un token alla volta, ma ad ogni passo filtra i logits per accettare solo i token che mantengono la stringa prodotta come prefisso di un JSON valido e conforme allo schema delle funzioni.
+> **Priorità massima**: il progetto non funziona senza questi fix.
 
-### 2.1 Approccio generale: automa a stati finiti (FSM) e vocabolario
+#### 1.1 Fix `schema_aware_validator.py`
 
-- **FSM**  
-  Una macchina a stati che rappresenta la grammatica JSON + le restrizioni dello schema. Tiene traccia dello stato attuale (es. “mi aspetto una chiave”, “dentro un numero”, “valore booleano”, ecc.) e per ogni carattere decide se la transizione è ammessa.
+**File:** [`src/schema_aware_validator.py`](file:///Ubuntu/home/gianl/python/call_me_maybe/src/schema_aware_validator.py)
 
-- **Trie dei token**  
-  Poiché il modello produce token interi (non singoli caratteri), dobbiamo verificare che l’intera stringa del token sia compatibile con la FSM.  
-  Un Trie (albero dei prefissi) organizzato sulle stringhe dei token permette di:
-  - Navigare i caratteri iniziali consentiti dallo stato corrente.
-  - Raccogliere solo i token che, carattere per carattere, rimangono validi.
+**Bug:** `param_trie_for()` usa `self.param_trie` invece di `self._param_tries`
 
-- **Mascheramento dei logits**  
-  - Si ottengono i logits dal modello.
-  - Si determina l’insieme dei token consentiti interrogando il Trie e simulando la FSM.
-  - Si impostano i logits di tutti gli altri token a `-inf` (usando numpy).
-  - Si seleziona il token con logit massimo (o campionamento in bonus).
+```python
+# PRIMA (bug):
+def param_trie_for(self, function_name: str) -> dict:
+    return self.param_trie.get(function_name, {})
 
-### 2.2 Stati principali della FSM (prima versione senza annidamenti)
+# DOPO (fix):
+def param_trie_for(self, function_name: str) -> dict:
+    return self._param_tries.get(function_name, {})
+```
 
-- `START` → accetta solo token che iniziano con `{`.
-- `OBJECT_OPEN` → dopo `{`, si aspetta `"` (inizio chiave `"function"`).
-- `IN_KEY` → si sta generando una chiave; la stringa accumulata deve essere prefisso di una delle chiavi attese (es. `"function"`, poi `"arguments"`, poi le chiavi dei parametri). Quando la chiave è completa, si accetta il token che contiene la virgoletta di chiusura e eventuali altri caratteri (ad esempio `":`).
-- `AFTER_COLON` → dopo i due punti, si aspetta l’inizio del valore. In base al tipo atteso, si transita nello stato appropriato:
-  - `IN_STRING`
-  - `IN_NUMBER`
-  - `IN_BOOLEAN`
-- `IN_STRING` → dopo la virgoletta di apertura, accetta tutti i caratteri che non contengono `"` non escapata (per semplicità vietiamo anche `\`). Quando compare un token che contiene `"`, la FSM valuta se dopo il `"` c’è un delimitatore valido (`,` o `}`) e transita di conseguenza.
-- `IN_NUMBER` → segue la grammatica JSON dei numeri. Accetta token che formano un prefisso di numero valido (cifre, segno meno, punto decimale, esponente).
-- `IN_BOOLEAN` → deve completare esattamente `true` o `false`. La FSM confronta il token con i prefissi di `true`/`false` e, una volta completata la parola, controlla che il carattere successivo sia un delimitatore.
-- `COMMA_OR_CLOSE` → dopo un valore, se ci sono altri parametri attesi, aspetta `,`; altrimenti aspetta `}`. Dopo la parentesi chiusa finale, lo stato diventa `END` e si ammette solo il token di fine sequenza.
+**Aggiungere anche** il metodo per sapere il tipo atteso di un parametro:
+```python
+def get_param_type(self, function_name: str, param_name: str) -> str:
+    """Return the expected type of a parameter ('number', 'string', 'boolean')."""
+    func = self._function_by_name.get(function_name, {})
+    params = func.get("parameters", {})
+    return params.get(param_name, {}).get("type", "string")
 
-### 2.3 Integrazione dello schema
+def get_required_params(self, function_name: str) -> list[str]:
+    """Return list of all parameter names for a function."""
+    func = self._function_by_name.get(function_name, {})
+    return list(func.get("parameters", {}).keys())
+```
 
-- Carica le definizioni delle funzioni dal file JSON.
-- L’FSM conosce tutti i nomi funzione validi.
-- Durante la generazione del nome funzione (dopo `"function": "`), l’FSM limita i token a quelli che sono prefissi di almeno uno dei nomi.
-- Non appena viene completato un nome esatto, l’FSM fissa la funzione scelta, e da quel momento gli stati successivi riflettono i parametri di quella funzione (nomi, tipi, ordine).
+#### 1.2 Fix `JsonValidator` — Integrazione con Schema
 
-**Scelta dell’ordine dei parametri**  
-Per semplificare la FSM, puoi forzare un ordine fisso (ad esempio alfabetico). In questo modo sai già quali chiavi aspettarti e in quale sequenza. Il modello genererà solo i valori. Questo è accettabile e non viola i requisiti, perché la funzione e i valori sono comunque decisi dal modello. L’FSM si assicura che la sintassi sia corretta.
+Il `JsonValidator` attuale valida la **struttura JSON generica** ma non conosce lo schema atteso (`name`, `parameters`, tipi). Serve estenderlo per:
 
-### 2.4 Algoritmo di mascheramento efficiente
+- Quando la chiave corrente è `"name"` → il valore deve essere un nome funzione valido (usare trie di `SchemaAwareValidator`)
+- Quando la chiave corrente è un parametro di tipo `"number"` → accettare solo token numerici
+- Quando la chiave corrente è un parametro di tipo `"string"` → accettare solo stringhe
 
-- Invece di iterare su tutto il vocabolario, usa il Trie per ottenere solo i token che iniziano con i caratteri consentiti dallo stato corrente.
-- Per ciascun token candidato, simula l’avanzamento della FSM carattere per carattere (con una copia dello stato). Se tutti i caratteri sono validi e lo stato finale è accettante, il token è valido.
-- Ottimizzazione: per stati come `IN_STRING` (dove la maggior parte dei token è ammessa tranne quelli con `"`), si può pre‑filtrare controllando semplicemente la presenza di `"` nel token.
-
-### 2.5 Loop di generazione principale
-
-- Parti dal prompt tokenizzato.
-- Inizializza l’FSM con l’elenco delle funzioni.
-- Finché non raggiungi lo stato `END` o un numero massimo di token:
-  - Ottieni i logits.
-  - Ricava la maschera dei token validi.
-  - Scegli il token con logit più alto.
-  - Aggiorna la sequenza di input.
-  - Aggiorna l’FSM con la stringa del token.
-- Restituisci la stringa JSON completa.
+**Approccio:** creare un `SchemaConstrainedDecoder` che coordina `JsonValidator` + `SchemaAwareValidator`.
 
 ---
 
-## Fase 3 – Modelli Pydantic e validazione dell’output
+### FASE 2 — Core: Loop di Generazione con Constrained Decoding (⏱ ~3-4 ore)
 
-- **Definisci le classi Pydantic** in `models.py`:
-  - `FunctionDef`: con `name`, `description`, `parameters` (dizionario nome→tipo), `returns`.
-  - `FunctionCallResult`: con `prompt`, `name`, `parameters`.
-- **Carica e valida** i file di input usando questi modelli. In caso di errori, fornisci messaggi chiari e termina senza crash.
-- **Dopo la generazione** del JSON, convertilo in oggetto Pydantic per garantire che i tipi corrispondano. Se necessario, applica conversioni (es. un numero scritto come intero può rimanere `float` se il tipo è `number` – come da esempi).
-- **Scrivi l’output** in `data/output/function_calling_results.json` (o nel percorso specificato) come array di oggetti, senza chiavi extra.
+> Questo è il **cuore del progetto** — quello che manca completamente.
+
+#### 2.1 Architettura del Decoder
+
+Creare il file [`src/constrained_decoder.py`](file:///Ubuntu/home/gianl/python/call_me_maybe/src/constrained_decoder.py)
+
+**Logica del loop:**
+```
+prompt → tokenize → input_ids → loop:
+    1. get_logits_from_input_ids(input_ids)
+    2. per ogni token nel vocabolario:
+       a. converti token_id → stringa
+       b. verifica se quella stringa è un continuation valido di generated_so_far
+       c. se NON valido → logit = -inf
+    3. argmax sui logit filtrati → token selezionato
+    4. aggiungi token a input_ids
+    5. ripeti finché JSON completo (validator.is_complete() == True)
+    6. parse JSON → restituisce dict
+```
+
+**Pseudocodice strutturato:**
+```python
+class ConstrainedDecoder(BaseModel):
+    model: Small_LLM_Model      # SDK
+    tokenizer: CustomTokenizer  # tokenizer custom
+    schema: SchemaAwareValidator
+
+    def generate(self, prompt: str) -> dict:
+        input_ids = self.tokenizer.encode(prompt)
+        generated_text = ""
+        validator = JsonValidator(text="")
+        
+        while not validator.is_complete():
+            logits = self.model.get_logits_from_input_ids(input_ids)
+            
+            # Constrained filtering
+            valid_logits = [-inf] * len(logits)
+            for token_id, logit in enumerate(logits):
+                token_str = self.tokenizer.decode(token_id)
+                if self._is_valid_next(token_str, validator, generated_text):
+                    valid_logits[token_id] = logit
+            
+            next_token_id = argmax(valid_logits)
+            next_token_str = self.tokenizer.decode(next_token_id)
+            
+            generated_text += next_token_str
+            input_ids.append(next_token_id)
+            
+            validator.text = generated_text
+        
+        return json.loads(generated_text)
+```
+
+#### 2.2 Validazione Token per Token — Il Punto Critico
+
+La funzione `_is_valid_next(token_str, validator, current_text)` deve:
+
+1. **Prendere il token candidato** (stringa)
+2. **Simulare l'aggiunta** al testo generato finora
+3. **Verificare** che il risultato sia ancora un JSON valido in costruzione
+
+**Usare `is_valid_continuation(token_str)`** già presente in `JsonValidator` — non è necessario reinventarlo!
+
+Attenzione: un token può rappresentare **più caratteri** (es. `" world"` è un singolo token). Il validator deve accettarli tutti insieme.
+
+#### 2.3 Vincolo Schema sulle Stringhe Speciali
+
+La parte più delicata: quando il decoder sta generando il **valore del campo `name`**, deve essere ristretto ai soli nomi di funzione validi.
+
+**Come rilevare il contesto:**
+- Usare `validator.current_key_path()` che restituisce la lista di chiavi annidate
+- Se `key_path[-1] == "name"` → siamo nel valore del nome funzione
+- Se `key_path[-2] == "parameters"` e `key_path[-1] == "un_param"` → siamo in un valore parametro
+
+**Come restringere:**
+- Per il **nome funzione**: usare il trie di `SchemaAwareValidator.name_trie`
+- Per **parametri number**: bloccare token che contengono lettere
+- Per **parametri string**: lasciare libero il testo
+
+#### 2.4 Completare `__main__.py`
+
+```python
+# Dopo la riga: function_txt = json.dumps(schema.json_functions, indent=2)
+# AGGIUNGERE:
+
+decoder = ConstrainedDecoder(model=model, tokenizer=tokenizer, schema=schema)
+results = []
+
+for item in json_prompts:
+    prompt = item.get("prompt", "")
+    if not prompt:
+        continue
+    
+    full_prompt = build_prompt(prompt, function_txt)
+    
+    try:
+        result = decoder.generate(full_prompt)
+        result["prompt"] = prompt  # aggiunge il campo obbligatorio
+        results.append(result)
+    except Exception as e:
+        print(f"Error processing prompt '{prompt}': {e}", file=sys.stderr)
+
+# Scrivi output
+output_path = os.path.join(argv.output, "function_calling_results.json")
+os.makedirs(argv.output, exist_ok=True)
+with open(output_path, 'w', encoding='utf-8') as f:
+    json.dump(results, f, indent=2, ensure_ascii=False)
+
+print(f"Results written to {output_path}")
+```
 
 ---
 
-## Fase 4 – Interfaccia da riga di comando
+### FASE 3 — Verifica Output e Test (⏱ ~1-2 ore)
 
-- In `src/__main__.py` usa `argparse` per accettare i tre argomenti opzionali.
-- Default:
-  - `--functions_definition`: `data/input/functions_definition.json`
-  - `--input`: `data/input/function_calling_tests.json`
-  - `--output`: `data/output/function_calling_results.json`
-- Per ogni prompt letto dal file di input, chiama la funzione di generazione e raccogli i risultati.
-- Gestisci sin da subito i casi di errore: file non trovato, JSON malformato, directory di output inesistente (creala).
+#### 3.1 Test Manuale
 
----
+Eseguire `uv run python -m src` e verificare che `data/output/function_calling_results.json` contenga:
 
-## Fase 5 – Robustezza e gestione errori
+```json
+[
+  {
+    "prompt": "What is the sum of 2 and 3?",
+    "name": "fn_add_numbers",
+    "parameters": {"a": 2.0, "b": 3.0}
+  },
+  ...
+]
+```
 
-- **Mai crash improvvisi**: tutte le operazioni di I/O e la generazione vanno protette con `try`/`except` specifici.
-- **Risorse**: usa sempre `with` per file e context manager ove possibile.
-- **Errori di generazione**: se la maschera diventa vuota (nessun token valido), solleva un’eccezione custom e nel main catturala producendo un messaggio di errore per quel prompt, ma proseguendo con i successivi.
-- **Messaggi utente**: ogni errore deve essere riportato in modo chiaro sullo standard error.
-- **Type hints e docstring**: ogni funzione deve avere annotazioni di tipo e una docstring in stile Google o NumPy.
+**Checklist output:**
+- [ ] Nomi funzione esatti (con `_`)
+- [ ] Nomi parametri esatti (come da `functions_definition.json`)
+- [ ] Tipi corretti (`number` → float, `string` → str)
+- [ ] Campo `prompt` presente in ogni oggetto
+- [ ] JSON valido (nessuna trailing comma, nessun commento)
 
----
+#### 3.2 Edge Cases da Testare
 
-## Fase 6 – Testing e validazione
+- Prompt ambiguo (es. "hello" → quale funzione?)
+- Numeri grandi (265, 345)
+- Stringhe con caratteri speciali
+- Funzioni con 3+ parametri (`fn_substitute_string_with_regex`)
 
-- **Test con i prompt di esempio** forniti nel file `function_calling_tests.json`. Verifica:
-  - Il JSON prodotto è sempre valido (prova a parsarlo).
-  - Il nome della funzione e i parametri corrispondono a quelli attesi.
-  - I tipi sono corretti (numeri come `float`, stringhe senza virgolette esterne).
-- **Casi limite da aggiungere manualmente**:
-  - Numeri negativi, zero, notazione scientifica (se permessa).
-  - Stringhe vuote `""`.
-  - Prompt ambigui (es. “somma 2 e 3” con più funzioni disponibili).
-  - Funzioni con parametri booleani (aggiungile ai tuoi test, anche se non presenti nell’esempio).
-- **Test di robustezza**: cancella un file di input, fornisci un JSON malformato, lancia il programma senza la cartella `llm_sdk/` – deve mostrare un errore e uscire pulitamente.
-- **Performance**: misura il tempo totale di esecuzione su tutti i prompt di esempio. Deve restare sotto i 5 minuti. Se troppo lento, ottimizza il mascheramento (es. caching delle maschere per stati comuni).
+#### 3.3 Accuracy Target
 
----
-
-## Fase 7 – README.md completo
-
-Il file deve includere tutte le sezioni richieste:
-
-- *Prima riga in corsivo con i login 42.*
-- **Description**: scopo del progetto e panoramica.
-- **Instructions**: come installare (`uv sync`), eseguire il comando base, compilare (non applicabile).
-- **Resources**: link alla documentazione di Pydantic, numpy, articoli sul constrained decoding, e una dichiarazione su come hai usato l’intelligenza artificiale (es. per generare idee sulla FSM, correggere bozze, ecc.).
-- **Algorithm explanation**: descrivi il tuo approccio: la FSM, il trie, il mascheramento dei logits, la scelta della funzione guidata dal modello.
-- **Design decisions**: spiega perché hai scelto un ordine fisso per i parametri, come gestisci i numeri, perché il trie migliora le prestazioni, ecc.
-- **Performance analysis**: riporta accuratezza (>90%), tempi di esecuzione, consumo di memoria.
-- **Challenges faced**: difficoltà incontrate (es. gestione dei token con spazi, riconoscimento fine stringa, parsing dei numeri) e soluzioni adottate.
-- **Testing strategy**: descrivi i test automatici e manuali effettuati.
-- **Example usage**: mostra alcuni comandi e l’output atteso.
+Il progetto richiede **≥90% accuracy** e **100% valid JSON**.
+Con constrained decoding la validità JSON è garantita by design.
+L'accuracy dipende dal prompt: migliorare `build_prompt` se i risultati sono sbagliati.
 
 ---
 
-## Fase 8 – Bonus (opzionali, implementabili separatamente)
+### FASE 4 — Lint e Type Checking (⏱ ~1 ora)
 
-### B.1 Supporto multi‑modello
-- Aggiungi un argomento `--model` al CLI. Istanzia `Small_LLM_Model` con quel nome. Verifica che il vocabolario e il tokenizer funzionino con altri modelli (es. altri Qwen). La logica FSM rimane invariata.
+```bash
+make lint
+# flake8 . — nessun errore
+# mypy . --warn-return-any --warn-unused-ignores --ignore-missing-imports
+#         --disallow-untyped-defs --check-untyped-defs
+```
 
-### B.2 Tokenizer proprio (evitare `encode`/`decode` dell’SDK)
-- Usa `get_path_to_vocab_file()` e `get_path_to_merges_file()` per ottenere i dati.
-- Implementa una tua funzione `encode(text)` che applica l’algoritmo BPE utilizzando le regole di merge.
-- Implementa `decode(ids)` ricostruendo il testo dai token.
-- Nel loop principale, tokenizza il prompt con la tua funzione e usa solo `get_logits_from_input_ids`.
-- Questo dimostra piena comprensione del tokenizer.
-
-### B.3 Error recovery avanzato
-- Se la generazione si blocca (maschera vuota), riprova con una piccola temperatura (aggiunta di rumore gaussiano ai logits) oppure reintroducendo un piccolo numero di token scelti diversamente (backtracking).
-- Oppure, se il JSON generato non è parsabile (non dovrebbe accadere), tenta un parsing “rilassato” con `json.JSONDecoder`.
-
-### B.4 Ottimizzazioni
-- **Caching**: per ogni stato FSM, salva l’insieme dei token validi (o la maschera) in modo da non ricalcolarlo se lo stato si ripresenta.
-- **Vettorizzazione**: usa numpy per applicare la maschera in modo efficiente senza cicli Python su tutti i token.
-- **Trie ottimizzato**: utilizza array di indici per i figli anziché dizionari, se il vocabolario è molto grande.
-
-### B.5 Suite di test completa
-- Scrivi test unitari con `pytest` per:
-  - Trie: costruzione e ricerca.
-  - FSM: transizioni valide e non valide per vari input.
-  - Funzioni di mascheramento: verifica che i token proibiti vengano impostati a `-inf`.
-  - Integrazione con un modello mock (che restituisce logits prevedibili) per testare l’intera pipeline.
-
-### B.6 Visualizzazione del processo di generazione
-- Aggiungi un’opzione `--verbose` che stampi ad ogni passo: stato FSM, token scelto, logit massimo, maschera applicata.
-- In alternativa, genera un file di log strutturato che mostra la costruzione del JSON token per token.
-
-### B.7 Argomenti annidati complessi
-- Estendi lo schema per supportare parametri di tipo `object` o `array`.
-- Modifica la FSM per gestire una pila di contesti: quando si apre una parentesi, si impila lo stato attuale e si inizia un nuovo contesto; quando si chiude, si ripristina lo stato precedente.
-- Questo richiede un automa a pila (pushdown automaton) invece di una semplice FSM.
-
-### B.8 Implementazione pubblica di encode/decode del tokenizer
-- Realizza le funzioni `custom_encode` e `custom_decode` descritte in B.2 come parte della tua libreria interna, documentandole e rendendole riutilizzabili (non solo per il function calling).
+**Problemi comuni da fixare:**
+- Type hints mancanti su tutte le funzioni
+- `Any` non dichiarato esplicitamente
+- Attributi privati pydantic senza tipo esplicito
 
 ---
+
+### FASE 5 — README.md (⏱ ~1-2 ore)
+
+**File:** [`README.md`](file:///Ubuntu/home/gianl/python/call_me_maybe/README.md) — **OBBLIGATORIO, mancante!**
+
+Il README deve contenere **esattamente** questi elementi (da subject):
+
+```markdown
+*This project has been created as part of the 42 curriculum by gipimpin.*
+
+## Description
+[obiettivo del progetto, panoramica function calling]
+
+## Instructions
+[installazione, compilazione, esecuzione]
+uv sync
+uv run python -m src
+
+## Algorithm Explanation
+[spiegazione constrained decoding passo per passo]
+
+## Design Decisions
+[scelte tecniche: perché BPE custom, perché FSM, perché trie]
+
+## Performance Analysis
+[accuracy ottenuta, tempo di esecuzione, affidabilità]
+
+## Challenges Faced
+[difficoltà incontrate e soluzioni]
+
+## Testing Strategy
+[come hai validato l'implementazione]
+
+## Example Usage
+[esempi concreti di esecuzione]
+
+## Resources
+[riferimenti tecnici + descrizione uso AI]
+```
+
+---
+
+## 🎁 FASE 6 — Bonus (⏱ ~4-8 ore)
+
+> I bonus **devono essere funzionanti** — non solo descritti nel README.
+
+### BONUS 1 — Supporto Multi-Modello ⭐
+
+**Obiettivo:** Permettere modelli diversi da `Qwen/Qwen3-0.6B` via CLI.
+
+**Implementazione:**
+```bash
+uv run python -m src --model "microsoft/Phi-3-mini-4k-instruct"
+```
+
+```python
+# In __main__.py, aggiungere argomento:
+parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
+
+# In Small_LLM_Model (non modificabile), l'SDK già accetta model_name:
+model = Small_LLM_Model(model_name=argv.model)
+```
+
+**File da creare:** `src/model_config.py` — pydantic model per configurazione modello.
+
+### BONUS 2 — Tokenizer Ricopiato (NO encode/decode diretti) ⭐⭐
+
+**Obiettivo:** Il bonus richiede di usare **solo** `get_logits_from_input_ids` e `get_path_to_vocab_file` — senza chiamare `model.encode()` e `model.decode()` nel codice principale.
+
+**Già parzialmente fatto:** `CustomTokenizer` implementa BPE da zero.
+
+**Cosa manca:**
+- `__main__.py` non deve usare `model.encode()` / `model.decode()` 
+- Usare esclusivamente `tokenizer.encode()` e `tokenizer.decode()` custom
+- Aggiungere metodo `decode(ids: list[int]) -> str` al CustomTokenizer (alias di `decode_list`)
+
+**Bonus extra richiesto:**
+> "Public implementation of tokenizer encode and optional decode methods"
+> "Demonstration of how encoding and decoding integrate with constrained decoding"
+
+Aggiungere a `CustomTokenizer`:
+```python
+@property  
+def vocab_size(self) -> int:
+    return len(self.token_id)
+
+def get_all_token_strings(self) -> dict[int, str]:
+    """Return mapping id -> decoded string for ALL tokens."""
+    result = {}
+    for id_, token_str in self._id_token.items():
+        try:
+            result[id_] = self.decode(id_)
+        except Exception:
+            result[id_] = ""
+    return result
+```
+
+### BONUS 3 — Error Recovery Avanzato ⭐
+
+**Obiettivo:** Se il decoder si blocca (nessun token valido), recuperare.
+
+**Implementazione:**
+```python
+# In ConstrainedDecoder.generate():
+valid_count = sum(1 for v in valid_logits if v != -inf)
+
+if valid_count == 0:
+    # Strategia 1: backtrack di N token
+    # Strategia 2: inserire token "sicuro" (es. chiudi la stringa corrente)
+    # Strategia 3: terminare anticipatamente con JSON parziale completato
+    raise ConstrainedDecodingError(f"No valid tokens at position {len(generated_text)}")
+```
+
+Creare eccezione custom `ConstrainedDecodingError` (classe pydantic o dataclass).
+
+### BONUS 4 — Caching e Batching ⭐
+
+**Obiettivo:** Ottimizzare le prestazioni.
+
+**Caching:**
+```python
+# Cache dei logit per prefissi identici
+from functools import lru_cache
+
+@lru_cache(maxsize=128)
+def _get_logits_cached(self, input_ids_tuple: tuple[int, ...]) -> tuple[float, ...]:
+    return tuple(self.model.get_logits_from_input_ids(list(input_ids_tuple)))
+```
+
+**Pre-computazione token validi:**
+- Pre-filtrare il vocabolario all'avvio per ogni stato JSON possibile
+- Memorizzare per ogni stato → set di token ID sempre validi
+
+### BONUS 5 — Test Suite Completa ⭐
+
+**File da creare:** `tests/` directory
+
+```
+tests/
+├── test_tokenizer.py
+├── test_json_validator.py
+├── test_schema_validator.py
+├── test_constrained_decoder.py
+└── test_integration.py
+```
+
+**Test minimi per ciascun modulo:**
+
+```python
+# test_tokenizer.py
+def test_encode_decode_roundtrip():
+    text = "Hello world"
+    ids = tokenizer.encode(text)
+    decoded = tokenizer.decode_list(ids)
+    assert decoded == text
+
+def test_special_tokens():
+    ids = tokenizer.encode("<|im_start|>user")
+    assert tokenizer.special_token_id["<|im_start|>"] in ids
+
+# test_json_validator.py
+def test_valid_json_complete():
+    v = JsonValidator(text='{"a": 1}')
+    assert v.is_complete() == True
+
+def test_invalid_json():
+    v = JsonValidator(text='{"a":')
+    assert v.validate() != State.END
+
+def test_next_char_start():
+    v = JsonValidator(text="")
+    assert "{" in v.next_char()
+
+# test_constrained_decoder.py
+def test_always_valid_json(decoder, prompts):
+    for prompt in prompts:
+        result = decoder.generate(prompt)
+        json.loads(json.dumps(result))  # must not raise
+```
+
+**Eseguire con:**
+```bash
+uv run pytest tests/ -v
+```
+
+### BONUS 6 — Visualizzazione del Processo ⭐
+
+**Obiettivo:** Mostrare token per token come il decoder sceglie il prossimo token.
+
+**Implementazione:**
+```python
+class ConstrainedDecoder(BaseModel):
+    verbose: bool = False
+
+    def generate(self, prompt: str) -> dict:
+        ...
+        while not validator.is_complete():
+            ...
+            if self.verbose:
+                top5 = sorted(enumerate(valid_logits), key=lambda x: -x[1])[:5]
+                print(f"\n[Step {step}] Generated: {generated_text!r}")
+                print(f"  Valid tokens: {valid_count}/{len(logits)}")
+                for tid, logit in top5:
+                    tok = self.tokenizer.decode(tid)
+                    print(f"  → {tok!r:20s} (logit={logit:.2f})")
+```
+
+**Aggiungere flag CLI:**
+```bash
+uv run python -m src --verbose
+```
+
+### BONUS 7 — Supporto Argomenti Annidati ⭐⭐
+
+**Obiettivo:** Gestire parametri di tipo `object` o `array` nella definizione funzione.
+
+**Estendere `SchemaAwareValidator`:**
+```python
+# functions_definition.json esempio con nested:
+{
+  "name": "fn_create_user",
+  "parameters": {
+    "user": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "number"}
+      }
+    }
+  }
+}
+```
+
+Il `JsonValidator` già supporta oggetti annidati. Serve coordinarlo con il tipo schema per parametri di tipo `object`.
+
+---
+
+## 📊 Riepilogo Priorità
+
+| Fase | Contenuto | Priorità | Tempo stimato |
+|------|-----------|----------|---------------|
+| 1 | Fix bug critici (param_trie, schema methods) | 🔴 CRITICA | 30 min |
+| 2 | Loop generazione + constrained decoding | 🔴 CRITICA | 3-4 ore |
+| 3 | Test manuale output + edge cases | 🔴 CRITICA | 1-2 ore |
+| 4 | Lint + mypy clean | 🟡 ALTA | 1 ora |
+| 5 | README.md completo | 🟡 ALTA | 1-2 ore |
+| 6.1 | Bonus: multi-modello | 🟢 BONUS | 1 ora |
+| 6.2 | Bonus: tokenizer ricreato (no encode/decode SDK) | 🟢 BONUS | 1-2 ore |
+| 6.3 | Bonus: error recovery | 🟢 BONUS | 1 ora |
+| 6.4 | Bonus: caching/batching | 🟢 BONUS | 1-2 ore |
+| 6.5 | Bonus: test suite pytest | 🟢 BONUS | 2-3 ore |
+| 6.6 | Bonus: visualizzazione | 🟢 BONUS | 1 ora |
+| 6.7 | Bonus: argomenti annidati | 🟢 BONUS | 2-3 ore |
+
+**Totale mandatory:** ~7-9 ore  
+**Totale con tutti i bonus:** ~16-22 ore
+
+---
+
+## ⚠️ Vincoli da Rispettare Durante l'Implementazione
+
+> [!IMPORTANT]
+> - **NON** usare `model.encode()` o `model.decode()` nel codice main — usare solo `CustomTokenizer` (requisito bonus, ma anche buona pratica)
+> - **NON** selezionare la funzione con regex o keyword matching — il modello deve farlo
+> - **NON** includere `data/output/` nel repository Git
+> - La **funzione chiamata deve essere scelta dal LLM** — il constrained decoding guida, ma non hardcoda la scelta
+
+> [!WARNING]  
+> Il `_STRING_CHARS` nel `JsonValidator` attualmente include TUTTI i codepoint Unicode tranne `"` e `\`. Per grandi vocabolari questo può essere lento — considerare di pre-filtrare i token accettabili.
+
+> [!CAUTION]
+> Il vocabolario di Qwen3-0.6B ha ~150,000 token. Iterare su tutti ad ogni passo è O(vocab_size) per token. Con prompt di 50 token e vocabolario 150k, sono ~7.5M operazioni per prompt. **Ottimizzare** con pre-filtering per stati.
+
+---
+
+## 🔍 File Critici da Completare
+
+| File | Azione richiesta |
+|------|-----------------|
+| [`src/__main__.py`](file:///Ubuntu/home/gianl/python/call_me_maybe/src/__main__.py) | Aggiungere loop generazione dopo `function_txt = ...` |
+| [`src/schema_aware_validator.py`](file:///Ubuntu/home/gianl/python/call_me_maybe/src/schema_aware_validator.py) | Fix `param_trie` → `_param_tries` + aggiungere `get_param_type()`, `get_required_params()` |
+| [`src/constrained_decoder.py`](file:///Ubuntu/home/gianl/python/call_me_maybe/src/constrained_decoder.py) | **CREARE** — logica core del constrained decoding |
+| [`README.md`](file:///Ubuntu/home/gianl/python/call_me_maybe/README.md) | **CREARE** — obbligatorio, attualmente mancante |
