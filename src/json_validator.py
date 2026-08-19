@@ -31,6 +31,14 @@ class JsonValidator(BaseModel):
     _stack: list[str] = PrivateAttr(default_factory=list)
     _key_stack: list[str | None] = PrivateAttr(default_factory=list)
 
+    @property
+    def status(self) -> State:
+        return self._status
+    
+    @property
+    def stack(self) -> list[str]:
+        return self._stack
+
     def _handle_string(self, i: int, text: str, next_state: State) -> tuple[int, State]:
         while i < len(text):
             if text[i] == "\"":
@@ -228,6 +236,7 @@ class JsonValidator(BaseModel):
                         status = State.BAD
                     elif stack[-1][0] == "{":
                         stack[-1] = "{,"
+                        key_stack[-1] = None 
                         status = State.EXPECT_KEY_OR_END_OBJ
                         i += 1
                     else:
@@ -241,13 +250,26 @@ class JsonValidator(BaseModel):
                 status = State.BAD
         return status, stack, key_stack, i
 
-    def validate(self) -> State:
-        status, stack, key_stack, _ = self._run(
-            self.text, 
-            status=self._status, 
-            stack=list(self._stack), 
-            key_stack=list(self._key_stack)
+    def advance(
+        self,
+        text: str,
+        status: State,
+        stack: list[str],
+        key_stack: list,
+        extra_text: str,
+        ) -> tuple[State, list[str], list, str]:
+        candidate = text + extra_text
+        new_status, new_stack, new_key_stack, _ = self._run(
+            candidate, 
+            status=status,
+            stack=list(stack),
+            key_stack=list(key_stack),
+            start=len(text),
         )
+        return new_status, new_stack, new_key_stack, candidate
+
+    def validate(self) -> State:
+        status, stack, key_stack, _ = self._run(self.text)
         self._status = status
         self._stack = stack
         self._key_stack = key_stack
