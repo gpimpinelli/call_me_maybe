@@ -74,62 +74,7 @@ def main():
         sys.exit(1)
     tokenizer = CustomTokenizer(token_id=json_vocab,dict_merge=dict_merge, special_token_id=json_tokenizer['added_tokens'])
     function_txt = json.dumps(schema.json_functions, indent=2)
-    #print(json_tokenizer['pre_tokenizer'])
 
-
-    # for p in json_prompts:
-    #     llm_prompt = build_prompt(p['prompt'], function_txt)
-    #     input_ids = tokenizer.encode(llm_prompt)
-    #     json_validator = JsonValidator(text='')
-    #     genetated_ids: list[int] = []
-    #     MAX_TOKEN = 200
-    #     status = State.START
-
-    #     # while not json_validator.is_complete() and len(genetated_ids) < MAX_TOKEN:
-        #     path = json_validator.current_key_path()
-        #     logits = model.get_logits_from_input_ids(input_ids)
-
-        #     if not path or path[-1] is None:
-        #         # punto puramente sintattico: non hai ancora completato
-        #         # nessuna chiave al livello corrente (es. devi ancora scrivere "name" o "parameters",
-        #         # oppure sei dentro le virgolette di una chiave non ancora chiusa)
-        #         allowed = json_validator.next_char()
-
-        #     elif len(path) == 1 and path[0] == "name":
-
-        #         if status != State.IN_STRING:
-        #             partial = get_partial(json_validator.text)
-        #             allowed = json_validator.next_char() & schema.next_char(partial)
-        #         else:
-        #             allowed = json_validator.next_char() 
-
-        #     elif len(path) == 1 and path[0] == "parameters":
-        #         # hai appena completato la chiave "parameters" al top level,
-        #         # sei sul punto di aprire (o hai appena aperto) l'oggetto annidato
-        #         if status != State.IN_STRING:
-        #             partial = get_partial(json_validator.text)
-        #             allowed = json_validator.next_char() & schema.next_char(partial)
-        #         else:
-        #             allowed = json_validator.next_char() 
-
-        #     elif len(path) == 2 and path[0] == "parameters" and path[1] is None:
-        #         # dentro parameters, non hai ancora completato nessuna chiave-parametro:
-        #         # stai scrivendo il NOME di un parametro
-        #         allowed = json_validator.next_char() & set(param_trie_chars(...))
-
-
-        #     elif len(path) == 2 and path[0] == "parameters" and path[1] is not None:
-        #         # hai completato la chiave di un parametro (es. "a"), sei nel suo VALORE
-        #         allowed = json_validator.next_char()  # eventualmente ristretto dal tipo atteso
-
-        #     else:
-        #         allowed = json_validator.next_char()
-            
-
-            
-
-    print(schema.name_trie)
-    #print(schema.function_by_name)
    
 
 if __name__ == "__main__":
