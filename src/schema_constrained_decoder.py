@@ -63,9 +63,9 @@ class SchemaConstrainedDecoder(BaseModel):
             if param_type == "number":
                 return syntatic_allowed & NUMBER_START_CHARS
             elif param_type == "boolean":
-                return syntactic_allowed & BOOLEAN_START_CHARS
+                return syntatic_allowed & BOOLEAN_START_CHARS
             elif param_type == "null":
-                return syntactic_allowed & NULL_START_CHARS
+                return syntatic_allowed & NULL_START_CHARS
             return syntatic_allowed
         
         else:
