@@ -14,7 +14,7 @@ class SchemaAwareValidator(BaseModel):
         self._param_tries = {
             name: self._init_trie(list(f.get("parameters", {}).keys()))
             for name, f in self._function_by_name.items()
-            }
+        }
 
     @property
     def name_trie(self) -> dict[str, Any]:
@@ -33,21 +33,46 @@ class SchemaAwareValidator(BaseModel):
             node[None] = word
         return trie
 
-    def next_char(self, partial: str) -> set[str]:
-        node = self.name_trie 
+    @staticmethod
+    def _walk_trie(trie: dict[str, Any], partial: str) -> set[str]:
+        node = trie 
         for char in partial:
             if char not in node:
                 return set()
             node = node[char]
         return {c for c in node if c is not None}
 
-    def is_complete(self, partial: str) -> bool:
-        node = self.name_trie
+    @staticmethod
+    def _is_complete_in_trie(trie: dict[str, Any], partial: str) -> bool:
+        node = trie
         for char in partial:
             if char not in node:
                 return False
             node = node[char]
         return None in node
 
-    def param_trie_for(self, function_name: str) -> dict:
-        return self.param_trie.get(function_name, {})
+    def next_char_for_name(self, partial: str) -> set[str]:
+        return self._walk_trie(self.name_trie, partial)
+    
+    def next_char_for_param(self, function_name: str, partial: str) -> set[str]:
+        trie = self.get_param_trie_name(function_name)
+        return self._walk_trie(trie, partial)
+
+    def is_complete(self, partial: str) -> bool:
+        return self._is_complete_in_trie(self.name_trie, partial)
+        
+    def is_complete_for_param(self, function_name: str, partial: str) -> bool:
+        trie = self.get_param_trie_name(function_name)
+        return self._is_complete_in_trie(trie, partial)
+
+    def get_param_trie_name(self, function_name: str) -> dict:
+        return self._param_tries.get(function_name, {})
+
+    def get_param_type(self, function_name: str, param_name: str) -> str:
+        func = self._function_by_name.get(function_name, {})
+        params = func.get("parameters", {})
+        return params.get(param_name, {}).get("type", "string")
+
+    def get_required_params(self, function_name: str) -> list[str]:
+        func = self._function_by_name.get(function_name, {})
+        return list(func.get("parameters", {}).keys())
