@@ -12,8 +12,9 @@ def get_logit_max(logits: np.ndarray) -> int:
 
 def build_prompt(user_prompt: str, functions_text: str) -> str:
     return (
-        f"You are a function calling assistant.\n"
-        f"Available functions:\n{functions_text}\n\n"
-        f"User request: {user_prompt}\n"
-        f"Respond only with a JSON object with keys 'name' and 'parameters'.\n"
+        f"<|im_start|>system\nYou are a function calling assistant.\n"
+        f"Available functions:\n{functions_text}<|im_end|>\n"
+        f"<|im_start|>user\n{user_prompt}\n"
+        f"Respond only with a JSON object with keys 'name' and 'parameters'.<|im_end|>\n"
+        f"<|im_start|>assistant\n"
     )

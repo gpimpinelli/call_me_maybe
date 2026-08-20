@@ -4,10 +4,10 @@ install:
 	uv sync
 
 run:
-	uv run python -m src
+	HF_TOKEN=$(HF_TOKEN) uv run python -m src
 
 debug:
-	uv run python -m pdb -m src
+	time uv run python -m src
 
 clean:
 	rm -rf */__pycache__ */.mypy_cache data/output/
