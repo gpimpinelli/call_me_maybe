@@ -51,6 +51,42 @@ class SchemaAwareValidator(BaseModel):
             node = node[char]
         return None in node
 
+    @staticmethod
+    def _unique_completion(trie: dict[str, Any], partial: str) -> str | None:
+        """Se, dato il prefisso `partial`, esiste UN SOLO modo di completare la
+        parola nel trie, ritorna il suffisso restante (senza includerlo il
+        `partial` stesso). Altrimenti ritorna None (prefisso ambiguo, dead-end,
+        o gia' completo con possibili continuazioni).
+        Questo permette di "auto-completare" nomi di funzione/parametro senza
+        dover interrogare il modello carattere per carattere quando il resto
+        e' comunque forzato dallo schema.
+        """
+        node = trie
+        for char in partial:
+            if char not in node:
+                return None
+            node = node[char]
+
+        suffix = ""
+        while True:
+            children = [c for c in node if c is not None]
+            has_end = None in node
+            if has_end and not children:
+                # partial+suffix combacia esattamente con un'unica parola,
+                # e nessun'altra parola la estende: completamento univoco.
+                return suffix
+            if has_end and children:
+                # ambiguo: potremmo fermarci qui oppure continuare con un'altra
+                # parola che ha questa come prefisso -> non forziamo nulla.
+                return None
+            if len(children) == 1:
+                char = children[0]
+                suffix += char
+                node = node[char]
+                continue
+            # piu' rami possibili: ambiguo.
+            return None
+
     def next_char_for_name(self, partial: str) -> set[str]:
         return self._walk_trie(self.name_trie, partial)
     
@@ -64,6 +100,13 @@ class SchemaAwareValidator(BaseModel):
     def is_complete_for_param(self, function_name: str, partial: str) -> bool:
         trie = self.get_param_trie_name(function_name)
         return self._is_complete_in_trie(trie, partial)
+
+    def get_unique_completion_for_name(self, partial: str) -> str | None:
+        return self._unique_completion(self.name_trie, partial)
+
+    def get_unique_completion_for_param(self, function_name: str, partial: str) -> str | None:
+        trie = self.get_param_trie_name(function_name)
+        return self._unique_completion(trie, partial)
 
     def get_param_trie_name(self, function_name: str) -> dict:
         return self._param_tries.get(function_name, {})

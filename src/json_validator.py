@@ -25,6 +25,12 @@ class JsonValidator(BaseModel):
     _STRING_CHARS: ClassVar[set[str]] = {
         chr(c) for c in range(0x20, 0x110000)
     } - {'"', "\\"}
+    # Caratteri che possono comparire ALL'INTERNO di un numero o di un literal
+    # speciale (true/false/null). Usati per ritrovare, con un backward-scan,
+    # l'indice di INIZIO del token corrente quando si riprende il parsing in
+    # modo incrementale da un punto intermedio.
+    _NUMBER_CHARS: ClassVar[set[str]] = _DIGITS | {".", "e", "E", "+", "-"}
+    _SPECIAL_CHARS: ClassVar[set[str]] = set("truefalsn")
 
     text: str
     _status: State = PrivateAttr(default=State.START)
@@ -113,6 +119,34 @@ class JsonValidator(BaseModel):
 
     def _after_close(self, stack: list[str]) -> State:
         return State.END if not stack else State.EXPECT_COMMA_OR_END
+
+    def _find_token_start(self, text: str, status: State, hint: int) -> int:
+        """Trova l'indice di INIZIO del token corrente (numero, literal
+        speciale true/false/null, o chiave stringa) scandendo `text` a
+        ritroso a partire da `hint`.
+
+        Necessario perche' _handle_number/_handle_special (e l'estrazione
+        della chiave in IN_KEY_STRING) assumono che l'indice passato punti
+        all'inizio del token: riprendendo il parsing da un punto intermedio
+        (parsing incrementale) senza questa correzione si perde il contesto
+        necessario per applicare correttamente le regole di validita' (es.
+        "0" seguito da un'altra cifra e' invalido, "nn" non e' un prefisso
+        valido di alcun literal).
+        """
+        if status == State.IN_NUMBER:
+            j = hint
+            while j > 0 and text[j - 1] in self._NUMBER_CHARS:
+                j -= 1
+            return j
+        if status == State.IN_SPECIAL:
+            j = hint
+            while j > 0 and text[j - 1] in self._SPECIAL_CHARS:
+                j -= 1
+            return j
+        if status == State.IN_KEY_STRING:
+            j = text.rfind('"', 0, hint)
+            return j + 1 if j != -1 else hint
+        return hint
 
     def _run(
         self,
@@ -259,21 +293,50 @@ class JsonValidator(BaseModel):
         extra_text: str,
         ) -> tuple[State, list[str], list, str]:
         candidate = text + extra_text
+        # Se stiamo riprendendo da dentro un token multi-carattere (numero,
+        # literal speciale, o chiave stringa), ritroviamo l'inizio vero del
+        # token invece di ripartire dal punto intermedio in cui eravamo
+        # rimasti: altrimenti _handle_number/_handle_special perdono il
+        # contesto necessario per validare correttamente (vedi
+        # _find_token_start).
+        resume_start = self._find_token_start(text, status, len(text))
         new_status, new_stack, new_key_stack, _ = self._run(
-            candidate, 
+            candidate,
             status=status,
             stack=list(stack),
             key_stack=list(key_stack),
-            start=len(text),
+            start=resume_start,
         )
         return new_status, new_stack, new_key_stack, candidate
 
     def validate(self) -> State:
+        # NON usare più per l'aggiornamento incrementale in consume().
+        # Resta utile solo se vuoi rivalidare da zero per qualche motivo (debug, sanity check).
         status, stack, key_stack, _ = self._run(self.text)
         self._status = status
         self._stack = stack
         self._key_stack = key_stack
         return status
+
+    def consume_incremental(self, extra_text: str) -> None:
+        """Aggiorna lo stato in modo incrementale invece di rifare il parsing da zero.
+
+        Delega ad advance(), che gia' gestisce correttamente sia il caso
+        "riprendo da uno stato strutturale" (safe, start=len(text)) sia il
+        caso "riprendo da dentro un token" (backward-scan del vero inizio
+        del token, vedi _find_token_start).
+        """
+        new_status, new_stack, new_key_stack, new_text = self.advance(
+            text=self.text,
+            status=self._status,
+            stack=self._stack,
+            key_stack=self._key_stack,
+            extra_text=extra_text,
+        )
+        self.text = new_text
+        self._status = new_status
+        self._stack = new_stack
+        self._key_stack = new_key_stack
 
     def is_complete(self) -> bool:
         return self.validate() == State.END
@@ -287,40 +350,44 @@ class JsonValidator(BaseModel):
         status = self._status if status is None else status
         stack = self._stack if stack is None else stack
         
+        whitespaces = {" ", "\n", "\t", "\r"}
+        
         match status:
             case State.START:
-                return {"{", "["}
+                return {"{", "["} | whitespaces
 
             case State.EXPECT_KEY_OR_END_OBJ:
+                base = {'"'} | whitespaces
                 if stack and stack[-1] == "{":
-                    return {'"', "}"}
-                return {'"'}
+                    base.add("}")
+                return base
 
             case State.IN_KEY_STRING | State.IN_STRING:
                 return self._STRING_CHARS | {'"', "\\"}
 
             case State.EXPECT_COLON:
-                return {":"}
+                return {":"} | whitespaces
 
             case State.EXPECT_VALUE:
                 allow_close = bool(stack) and stack[-1] == "["
-                base = {'"', "-", "[", "{", "n", "t", "f"} | self._DIGITS
+                base = {'"', "-", "[", "{", "n", "t", "f"} | self._DIGITS | whitespaces
                 if allow_close:
                     base.add("]")
                 return base
 
             case State.IN_NUMBER:
-                return self._DIGITS | {".", "e", "E", "+", "-", ",", "]", "}"}
+                return self._DIGITS | {".", "e", "E", "+", "-", ",", "]", "}"} | whitespaces
 
             case State.IN_SPECIAL:
                 return set("ruealsn")
 
             case State.EXPECT_COMMA_OR_END:
+                base = {",", "]", "}"} | whitespaces
                 if stack and stack[-1][0] == "{":
-                    return {",", "}"}
+                    base = {",", "}"} | whitespaces
                 elif stack and stack[-1][0] == "[":
-                    return {",", "]"}
-                return {",", "]", "}"}
+                    base = {",", "]"} | whitespaces
+                return base
 
             case State.END | State.BAD:
                 return set()
@@ -329,8 +396,13 @@ class JsonValidator(BaseModel):
                 return set()
 
     def is_valid_continuation(self, token_str: str) -> bool:
-        candidate = self.text + token_str
-        new_status, _, _, _ = self._run(candidate)
+        new_status, _, _, _ = self.advance(
+            text=self.text,
+            status=self._status,
+            stack=list(self._stack),
+            key_stack=list(self._key_stack),
+            extra_text=token_str,
+        )
         return new_status != State.BAD
 
     def current_key_path(self) -> list[str | None]:
