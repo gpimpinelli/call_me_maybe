@@ -10,10 +10,9 @@ import time
 # l'eccezione si propaghi normalmente con il suo traceback originale,
 # invece di nasconderla dietro un except generico.
 from .custom_tokenizer import CustomTokenizer
-from .json_validator import JsonValidator, State
-from .utils import soft_max, get_logit_max, build_prompt
+from .utils import build_prompt
 from .schema_aware_validator import SchemaAwareValidator
-from .schema_constrained_decoder import SchemaConstrainedDecoder
+
 
 # llm_sdk invece va copiato manualmente accanto a src/ (vedi subject IV.3.1):
 # e' l'unico import per cui ha senso un messaggio d'errore dedicato e
@@ -72,174 +71,196 @@ def get_line_from_file(name: str) -> dict[tuple[str, str], int]:
     return res
 
 
-def get_valid_tokens(decoder: SchemaConstrainedDecoder, tokenizer: CustomTokenizer, allowed_cache: dict) -> list[int]:
-    valid_ids = []
-
-    val_text = decoder.validator.text
-    val_status = decoder.validator.status
-    val_stack_tup = tuple(decoder.validator.stack)
-    val_key_path_tup = tuple(decoder.validator.current_key_path())
-
-    def cached_allowed(text_so_far: str, status, json_stack_tup: tuple, key_stack_tup: tuple) -> set:
-        # FASE 3: Estrazione precisa di partial e fix su chiavi di base
-        needs_partial = (
-            (status == State.IN_STRING and key_stack_tup and key_stack_tup[-1] == "name") or
-            (status == State.IN_KEY_STRING and len(key_stack_tup) in (1, 2))
-        )
+def _predict_function_name(
+    input_ids: list[int],
+    model: Any,
+    tokenizer: CustomTokenizer,
+    schema: SchemaAwareValidator
+) -> str:
+    """Fa scegliere all'LLM il nome della funzione tramite constrained decoding sui logit."""
+    current_name = ""
+    
+    while not schema.is_complete(current_name):
+        # 1. Se lo schema ha un completamento univoco forzato, applicalo a costo 0
+        forced = schema.get_unique_completion_for_name(current_name)
+        if forced:
+            current_name += forced
+            input_ids.extend(tokenizer.encode(forced))
+            break
+            
+        allowed_chars = schema.next_char_for_name(current_name)
+        if schema.is_complete(current_name):
+            allowed_chars.add('"')
+            
+        # 2. Ottieni logit dal modello
+        logits = model.get_logits_from_input_ids(input_ids)
         
-        partial = None
-        if needs_partial:
-            full_text = val_text + text_so_far
-            start = full_text.rfind('"')
-            partial = full_text[start + 1:]
+        # 3. Maschera i token: ammetti solo quelli che continuano prefissi validi
+        best_id = None
+        best_score = float("-inf")
         
-        stack_top = json_stack_tup[-1] if json_stack_tup else None
-        key = (status, stack_top, key_stack_tup, partial)
-
-        cached = allowed_cache.get(key)
-        if cached is None:
-            full_text_for_schema = val_text + text_so_far
-            # FIX MEMORIA: Rimosso il frozenset che bloccava le performance
-            cached = decoder.allowed_next_chars(
-                text=full_text_for_schema, 
-                status=status, 
-                stack=list(json_stack_tup), 
-                path=list(key_stack_tup)
-            )
-            allowed_cache[key] = cached
-        return cached
-
-    stack = [(
-        tokenizer.trie_token,
-        "",
-        val_status,
-        val_stack_tup,
-        val_key_path_tup
-    )]
-
-    # --- COSTANTI FASE 4 ---
-    END_TOKEN_CHARS = {']', '}', ',', ' ', '\n', '\t', '\r'}
-
-    while stack:
-        node, text_so_far, status, json_stack_tup, key_stack_tup = stack.pop()
-
-        if None in node:
-            valid_ids.extend(node[None])
-
-        allowed = cached_allowed(text_so_far, status, json_stack_tup, key_stack_tup)
-
-        for char, next_node in node.items():
-            if char is None:
-                continue
-
-            if char in allowed:
-                # --- FASE 4: MASSIMIZZAZIONE DEL FAST-PATH ---
-                is_fast_path = False
+        # Consideriamo solo i token che iniziano con uno dei caratteri permessi
+        for char in allowed_chars:
+            candidate_ids = tokenizer.get_tokens_starting_with(char) if hasattr(tokenizer, "get_tokens_starting_with") else []
+            # Fallback se usi ancora la lista/dizionario base
+            if not candidate_ids:
+                candidate_ids = [tid for tid, s in getattr(tokenizer, "decoded_tokens", {}).items() if s.startswith(char)]
                 
-                if status in (State.IN_STRING, State.IN_KEY_STRING) and char not in ('"', '\\'):
-                    is_fast_path = True
-                elif status in (State.IN_NUMBER, State.IN_SPECIAL) and char not in END_TOKEN_CHARS:
-                    is_fast_path = True
+            for tid in candidate_ids:
+                tok_str = tokenizer.decode(tid)
+                # Verifica se l'intero token è un prefisso valido nel trie delle funzioni
+                trial = current_name + tok_str
+                # Controllo di coerenza con il trie dei nomi
+                node = schema.name_trie
+                valid_token = True
+                for c in trial:
+                    if c not in node:
+                        valid_token = False
+                        break
+                    node = node[c]
+                
+                if valid_token and logits[tid] > best_score:
+                    best_score = logits[tid]
+                    best_id = tid
+                    
+        if best_id is None:
+            break
+            
+        chosen_str = tokenizer.decode(best_id)
+        current_name += chosen_str
+        input_ids.append(best_id)
+        
+    return current_name.strip('"')
 
-                if is_fast_path:
-                    stack.append((next_node, text_so_far + char, status, json_stack_tup, key_stack_tup))
+
+def _extract_parameter_value(
+    input_ids: list[int],
+    param_type: str,
+    model: Any,
+    tokenizer: CustomTokenizer
+) -> Any:
+    """Fa estrarre all'LLM il valore del parametro vincolandolo al tipo (number o string) via DFA."""
+    value_str = ""
+    max_steps = 60  # limite di sicurezza per stringhe lunghe
+    
+    DIGITS_AND_SIGNS = set("0123456789.-")
+    
+    for _ in range(max_steps):
+        logits = model.get_logits_from_input_ids(input_ids)
+        best_id = None
+        best_score = float("-inf")
+        
+        if param_type == "number":
+            # DFA per i numeri: ammette solo cifre/segni o terminatore (virgola o graffa)
+            for tid in range(len(logits)):
+                tok_str = tokenizer.decode(tid)
+                # Se è il carattere di chiusura del numero
+                if tok_str in (",", "}", " ", "\n") and len(value_str) > 0:
+                    if logits[tid] > best_score:
+                        best_score = logits[tid]
+                        best_id = tid
+                # Se è una continuazione valida del numero
+                elif all(c in DIGITS_AND_SIGNS for c in tok_str) and len(tok_str) > 0:
+                    if logits[tid] > best_score:
+                        best_score = logits[tid]
+                        best_id = tid
+                        
+            if best_id is None:
+                break
+                
+            chosen = tokenizer.decode(best_id)
+            if chosen in (",", "}", " ", "\n"):
+                break
+            value_str += chosen
+            input_ids.append(best_id)
+            
+        elif param_type == "string":
+            # DFA per le stringhe: accetta testo finché il modello non emette il delimitatore "
+            for tid in range(len(logits)):
+                tok_str = tokenizer.decode(tid)
+                if '"' in tok_str:
+                    # Token di chiusura o che contiene virgolette finali
+                    if logits[tid] > best_score:
+                        best_score = logits[tid]
+                        best_id = tid
                 else:
-                    new_text, new_status, new_stack, new_key_stack = decoder.advance_hypothetical(
-                        text=val_text + text_so_far,
-                        status=status,
-                        stack=list(json_stack_tup),
-                        path=list(key_stack_tup),
-                        extra_char=char
-                    )
+                    if logits[tid] > best_score:
+                        best_score = logits[tid]
+                        best_id = tid
+                        
+            if best_id is None:
+                break
+                
+            chosen = tokenizer.decode(best_id)
+            if '"' in chosen:
+                # Prendi solo la parte prima della virgoletta di chiusura
+                value_str += chosen.split('"')[0]
+                break
+            value_str += chosen
+            input_ids.append(best_id)
+        else:
+            break
 
-                    if new_status != State.BAD:
-                        stack.append((
-                            next_node, 
-                            text_so_far + char, 
-                            new_status, 
-                            tuple(new_stack), 
-                            tuple(new_key_stack)
-                        ))
-    return valid_ids
-
-
-def get_forced_completion(decoder: SchemaConstrainedDecoder) -> str | None:
-    """Se lo schema determina in modo univoco il resto del nome funzione o del
-    nome parametro corrente, ritorna il suffisso da forzare senza consultare
-    il modello. None se serve comunque una scelta (o non siamo in uno di
-    questi due casi).
-    """
-    path = decoder.validator.current_key_path()
-    status = decoder.validator.status
-    text = decoder.validator.text
-
-    if path and path[-1] == "name" and status == State.IN_STRING:
-        start = text.rfind('"')
-        partial = text[start + 1:]
-        return decoder.func_schema.get_unique_completion_for_name(partial)
-
-    if len(path) == 1 and path[0] == "parameters" and status == State.IN_KEY_STRING:
-        if decoder.resolved_function_name is None:
-            return None
-        start = text.rfind('"')
-        partial = text[start + 1:]
-        return decoder.func_schema.get_unique_completion_for_param(
-            decoder.resolved_function_name, partial
-        )
-
-    return None
+    # Cast corretto del dato
+    if param_type == "number":
+        try:
+            return float(value_str) if "." in value_str else int(value_str)
+        except ValueError:
+            return 0.0
+    return value_str
 
 
-def generate_function_call(prompt: str, functions_txt: str, model, tokenizer, schema) -> dict:
+def generate_function_call(
+    prompt: str,
+    functions_txt: str,
+    model: Any,
+    tokenizer: CustomTokenizer,
+    schema: SchemaAwareValidator
+) -> dict:
+    """Esegue la generazione ibrida: sintassi deterministica + inferenza mirata."""
     prompt_txt = build_prompt(prompt, functions_txt)
     input_ids = tokenizer.encode(prompt_txt)
-
-    validator = JsonValidator(text="")
-    decoder = SchemaConstrainedDecoder(validator=validator, func_schema=schema)
-    allowed_cache: dict[tuple, set] = {}
-
-    for step_i in range(300):
-        if decoder.validator.is_complete():
-            break
-
-        forced = decoder.allowed_next_chars()
-        if len(forced) == 1:
-            forced_char = next(iter(forced))
-            decoder.consume(forced_char)
-            input_ids.extend(tokenizer.encode(forced_char))
-            continue
-
-        forced_completion = get_forced_completion(decoder)
-        if forced_completion:
-            decoder.consume(forced_completion)
-            input_ids.extend(tokenizer.encode(forced_completion))
-            continue
-
-        logits = model.get_logits_from_input_ids(input_ids)
-
-        valid_token_ids = get_valid_tokens(decoder, tokenizer, allowed_cache)
-
-        if not valid_token_ids:
-            break
-
-        # --- FIX: TORNIAMO AL PURE PYTHON (È MOSTRUOSAMENTE PIÙ VELOCE QUI) ---
-        if len(valid_token_ids) == 1:
-            max_id = valid_token_ids[0]
-        else:
-            # Estrae l'ID con il valore logit più alto sfiorando solo i token validi
-            # bypassando completamente la conversione costosa dei 150k token in numpy
-            max_id = max(valid_token_ids, key=lambda vid: logits[vid])
-
-        token_str = tokenizer.decode(max_id)
-        decoder.consume(token_str)
-        input_ids.append(max_id)
-
-    try:
-        result = json.loads(decoder.validator.text)
-    except json.JSONDecodeError:
-        result = {"error": "JSON malformato", "raw_text": decoder.validator.text}
-
-    return result
+    
+    # 1. Inietta l'apertura JSON (0 chiamate neuroni)
+    start_prefix = '{\n  "name": "'
+    input_ids.extend(tokenizer.encode(start_prefix))
+    
+    # 2. SELEZIONE FUNZIONE (Guidata esclusivamente dai logit del modello)
+    func_name = _predict_function_name(input_ids, model, tokenizer, schema)
+    
+    # 3. Inietta il passaggio ai parametri (0 chiamate neuroni)
+    params_prefix = '",\n  "parameters": {'
+    input_ids.extend(tokenizer.encode(params_prefix))
+    
+    # 4. Recupera i parametri attesi dallo schema Pydantic
+    required_params = schema.get_required_params(func_name)
+    extracted_params: dict[str, Any] = {}
+    
+    # 5. ESTRAZIONE PARAMETRI (Inferenza mirata + DFA di tipo)
+    for i, p_name in enumerate(required_params):
+        p_type = schema.get_param_type(func_name, p_name)
+        
+        # Inietta la chiave del parametro deterministicamente
+        p_prefix = f'\n    "{p_name}": ' if i == 0 else f',\n    "{p_name}": '
+        if p_type == "string":
+            p_prefix += '"'
+        input_ids.extend(tokenizer.encode(p_prefix))
+        
+        # Estrai il valore con decodifica vincolata al tipo
+        val = _extract_parameter_value(input_ids, p_type, model, tokenizer)
+        extracted_params[p_name] = val
+        
+        # Inietta la chiusura della stringa se applicabile
+        if p_type == "string":
+            input_ids.extend(tokenizer.encode('"'))
+            
+    # 6. Inietta la chiusura dell'oggetto (0 chiamate neuroni)
+    input_ids.extend(tokenizer.encode('\n  }\n}'))
+    
+    return {
+        "name": func_name,
+        "parameters": extracted_params
+    }
 
 
 def main():
@@ -262,7 +283,6 @@ def main():
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-        
     tokenizer = CustomTokenizer(token_id=json_vocab,dict_merge=dict_merge, special_token_id=json_tokenizer['added_tokens'])
     function_txt = json.dumps(schema.json_functions, indent=2)
     results = []

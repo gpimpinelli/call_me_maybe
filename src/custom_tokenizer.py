@@ -23,7 +23,8 @@ class CustomTokenizer(BaseModel):
     _byte_encoder: dict[int, str] = PrivateAttr(default_factory=dict)
     _byte_decoder: dict[str, int] = PrivateAttr(default_factory=dict)
     _special_split_regex: re.Pattern | None = PrivateAttr(default=None)
-    trie_token: dict[str, Any] = Field(default_factory=dict)
+    tokens_by_first_char: dict[str, list[int]] = Field(default_factory=dict)
+    decoded_tokens: dict[int, str] = Field(default_factory=dict)
             
     @model_validator(mode='before')
     @classmethod
@@ -43,7 +44,7 @@ class CustomTokenizer(BaseModel):
         if self.special_token_id:
             pattern = "|".join(re.escape(tok) for tok in self.special_token_id)
             self._special_split_regex = re.compile(f"({pattern})")
-        self.trie_token = self._init_trie()
+        self._init_dfa_cache()
 
     @property
     def id_token(self):
@@ -53,8 +54,10 @@ class CustomTokenizer(BaseModel):
     def special_id_token(self):
         return self._special_id_token
 
-    def _init_trie(self):
-        trie: dict = {}
+    def _init_dfa_cache(self):
+        """Pre-calcola e raggruppa tutti i token per il loro primo carattere in O(1)"""
+        self.tokens_by_first_char = {}
+        self.decoded_tokens = {}
         for id_ in self._id_token:
             if id_ in self.special_id_token:
                 continue
@@ -64,11 +67,19 @@ class CustomTokenizer(BaseModel):
                 continue
             if not decoded or "\ufffd" in decoded:
                 continue
-            node = trie
-            for char in decoded:
-                node = node.setdefault(char, {})
-            node.setdefault(None, []).append(id_)
-        return trie
+            
+            self.decoded_tokens[id_] = decoded
+            first_char = decoded[0]
+            if first_char not in self.tokens_by_first_char:
+                self.tokens_by_first_char[first_char] = []
+            self.tokens_by_first_char[first_char].append(id_)
+
+    # Helper functions per il DFA
+    def get_tokens_starting_with(self, char: str) -> list[int]:
+        return self.tokens_by_first_char.get(char, [])
+        
+    def get_decoded_token(self, id_: int) -> str:
+        return self.decoded_tokens.get(id_, "")
 
     def _bytes_to_unicode(self):
         tokens = (

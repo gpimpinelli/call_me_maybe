@@ -5,16 +5,10 @@ class SchemaAwareValidator(BaseModel):
     json_functions: list[dict]
     _function_by_name: dict[str, dict] = PrivateAttr(default_factory=dict)
     _name_trie: dict[str, Any] = PrivateAttr(default_factory=dict)
-    _param_tries: dict[str, dict] = PrivateAttr(default_factory=dict)
-
 
     def model_post_init(self, __context):
         self._function_by_name = {f["name"]: f for f in self.json_functions}
         self._name_trie = self._init_trie([f["name"] for f in self.json_functions])
-        self._param_tries = {
-            name: self._init_trie(list(f.get("parameters", {}).keys()))
-            for name, f in self._function_by_name.items()
-        }
 
     @property
     def name_trie(self) -> dict[str, Any]:
@@ -90,26 +84,11 @@ class SchemaAwareValidator(BaseModel):
     def next_char_for_name(self, partial: str) -> set[str]:
         return self._walk_trie(self.name_trie, partial)
     
-    def next_char_for_param(self, function_name: str, partial: str) -> set[str]:
-        trie = self.get_param_trie_name(function_name)
-        return self._walk_trie(trie, partial)
-
     def is_complete(self, partial: str) -> bool:
         return self._is_complete_in_trie(self.name_trie, partial)
         
-    def is_complete_for_param(self, function_name: str, partial: str) -> bool:
-        trie = self.get_param_trie_name(function_name)
-        return self._is_complete_in_trie(trie, partial)
-
     def get_unique_completion_for_name(self, partial: str) -> str | None:
         return self._unique_completion(self.name_trie, partial)
-
-    def get_unique_completion_for_param(self, function_name: str, partial: str) -> str | None:
-        trie = self.get_param_trie_name(function_name)
-        return self._unique_completion(trie, partial)
-
-    def get_param_trie_name(self, function_name: str) -> dict:
-        return self._param_tries.get(function_name, {})
 
     def get_param_type(self, function_name: str, param_name: str) -> str:
         func = self._function_by_name.get(function_name, {})
