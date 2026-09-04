@@ -256,7 +256,6 @@ def generate_function_call(
 def main() -> None:
     argv = get_argv()
     model = Small_LLM_Model()
-    print(model._device)
     try:
         merge_path = model.get_path_to_merges_file()
         tokenizer_path = model.get_path_to_tokenizer_file()
