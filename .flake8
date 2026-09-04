@@ -7,4 +7,5 @@ exclude =
     data,
     input,
     build,
-    dist
+    dist,
+    llm_sdk

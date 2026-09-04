@@ -4,16 +4,15 @@ from typing import Any, ClassVar
 
 
 class CustomTokenizer(BaseModel):
-    ## Per bonus capire come fare un traduttore di regex
     SPLIT_REGEX: ClassVar[re.Pattern] = re.compile(
-    r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)"""
-    r"""|[^\r\n\w]?[^\W\d_]+"""
-    r"""|\d"""
-    r"""|\ ?[^\s\w]+[\r\n]*"""
-    r"""|\s*[\r\n]+"""
-    r"""|\s+(?!\S)"""
-    r"""|\s+""",
-    re.VERBOSE
+        r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)"""
+        r"""|[^\r\n\w]?[^\W\d_]+"""
+        r"""|\d"""
+        r"""|\ ?[^\s\w]+[\r\n]*"""
+        r"""|\s*[\r\n]+"""
+        r"""|\s+(?!\S)"""
+        r"""|\s+""",
+        re.VERBOSE,
     )
     token_id: dict[str, int]
     dict_merge: dict[tuple[str, str], int]
@@ -25,37 +24,40 @@ class CustomTokenizer(BaseModel):
     _special_split_regex: re.Pattern | None = PrivateAttr(default=None)
     tokens_by_first_char: dict[str, list[int]] = Field(default_factory=dict)
     decoded_tokens: dict[int, str] = Field(default_factory=dict)
-            
-    @model_validator(mode='before')
+
+    @model_validator(mode="before")
     @classmethod
-    def filter_special_token(cls, data):
+    def filter_special_token(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            special_token_id = data.get('special_token_id', None)
+            special_token_id = data.get("special_token_id", None)
             if special_token_id:
-                special_token_id = {token['content']: token['id'] for token in special_token_id}
-                data['special_token_id'] = special_token_id
+                special_token_id = {
+                    token["content"]: token["id"] for token in special_token_id
+                }
+                data["special_token_id"] = special_token_id
         return data
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context: Any) -> None:
         self._id_token = {id_: token for token, id_ in self.token_id.items()}
         self._byte_encoder = self._bytes_to_unicode()
         self._byte_decoder = {v: k for k, v in self._byte_encoder.items()}
-        self._special_id_token = {v: k for k, v in self.special_token_id.items()}
+        self._special_id_token = {
+            v: k for k, v in self.special_token_id.items()
+        }
         if self.special_token_id:
             pattern = "|".join(re.escape(tok) for tok in self.special_token_id)
             self._special_split_regex = re.compile(f"({pattern})")
         self._init_dfa_cache()
 
     @property
-    def id_token(self):
+    def id_token(self) -> dict[int, str]:
         return self._id_token
 
     @property
-    def special_id_token(self):
+    def special_id_token(self) -> dict[int, Any]:
         return self._special_id_token
 
-    def _init_dfa_cache(self):
-        """Pre-calcola e raggruppa tutti i token per il loro primo carattere in O(1)"""
+    def _init_dfa_cache(self) -> None:
         self.tokens_by_first_char = {}
         self.decoded_tokens = {}
         for id_ in self._id_token:
@@ -67,25 +69,24 @@ class CustomTokenizer(BaseModel):
                 continue
             if not decoded or "\ufffd" in decoded:
                 continue
-            
+
             self.decoded_tokens[id_] = decoded
             first_char = decoded[0]
             if first_char not in self.tokens_by_first_char:
                 self.tokens_by_first_char[first_char] = []
             self.tokens_by_first_char[first_char].append(id_)
 
-    # Helper functions per il DFA
     def get_tokens_starting_with(self, char: str) -> list[int]:
         return self.tokens_by_first_char.get(char, [])
-        
+
     def get_decoded_token(self, id_: int) -> str:
         return self.decoded_tokens.get(id_, "")
 
-    def _bytes_to_unicode(self):
+    def _bytes_to_unicode(self) -> dict[int, str]:
         tokens = (
-            list(range(ord('!'), ord('~') + 1)) +
-            list(range(ord('¡'), ord('¬') + 1)) +
-            list(range(ord('®'), ord('ÿ') + 1))
+            list(range(ord("!"), ord("~") + 1))
+            + list(range(ord("¡"), ord("¬") + 1))
+            + list(range(ord("®"), ord("ÿ") + 1))
         )
         copy = tokens[:]
         n = 0
@@ -98,7 +99,11 @@ class CustomTokenizer(BaseModel):
 
     def encode(self, text: str) -> list[int]:
         l_index = []
-        pieces = self._special_split_regex.split(text) if self._special_split_regex else [text]
+        pieces = (
+            self._special_split_regex.split(text)
+            if self._special_split_regex
+            else [text]
+        )
         for piece in pieces:
             if not piece:
                 continue
@@ -111,7 +116,7 @@ class CustomTokenizer(BaseModel):
                 chars = [self._byte_encoder[b] for b in word_bytes]
                 while len(chars) >= 2:
                     best_pair = None
-                    best_rank = float('inf')
+                    best_rank = float("inf")
                     for i in range(len(chars) - 1):
                         pair = (chars[i], chars[i + 1])
                         rank = self.dict_merge.get(pair)
@@ -123,7 +128,8 @@ class CustomTokenizer(BaseModel):
                     new_word = []
                     i = 0
                     while i < len(chars):
-                        if i < len(chars) - 1 and (chars[i], chars[i + 1]) == best_pair:
+                        if (i < len(chars) - 1 and
+                                (chars[i], chars[i + 1]) == best_pair):
                             new_word.append(chars[i] + chars[i + 1])
                             i += 2
                         else:
@@ -134,7 +140,7 @@ class CustomTokenizer(BaseModel):
                     l_index.append(self.token_id[c])
         return l_index
 
-    def decode(self, id_: int) -> str:
+    def decode(self, id_: int) -> Any:
         if id_ in self.special_id_token:
             return self.special_id_token[id_]
         token_str = self._id_token.get(id_, "")
@@ -156,4 +162,4 @@ class CustomTokenizer(BaseModel):
                     accumulate_byte.append(self._byte_decoder[c])
         if accumulate_byte:
             res += accumulate_byte.decode("utf-8", errors="replace")
-        return res
+        return str(res)
