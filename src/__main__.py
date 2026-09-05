@@ -1,3 +1,12 @@
+"""Entry point for the constrained function-calling pipeline.
+
+This module wires together the tokenizer, the language model, and the
+schema-aware validator to produce structured function-call JSON from
+natural-language prompts.  It can be executed directly via::
+
+    python -m src --input prompts.json --output results.json
+"""
+
 from typing import Any
 import sys
 import json
@@ -19,6 +28,16 @@ except ModuleNotFoundError as e:
 
 
 def get_argv() -> argparse.Namespace:
+    """Parse and return command-line arguments.
+
+    Returns:
+        An :class:`argparse.Namespace` with the following attributes:
+
+        * ``functions_definition`` -- path to the functions-definition
+          JSON file.
+        * ``input`` -- path to the input prompts JSON file.
+        * ``output`` -- path (file or directory) for the results.
+    """
     parser = argparse.ArgumentParser(description="Function calling in LLMs")
     parser.add_argument(
         "--functions_definition",
@@ -39,6 +58,21 @@ def get_argv() -> argparse.Namespace:
 
 
 def get_json_from_file(name: str) -> Any:
+    """Read and parse a JSON file.
+
+    Args:
+        name: Path to the JSON file to read.
+
+    Returns:
+        The deserialised JSON content (dict, list, etc.).
+
+    Raises:
+        FileNotFoundError: If *name* does not exist.
+        PermissionError: If the file cannot be read due to
+            insufficient permissions.
+        IsADirectoryError: If *name* points to a directory.
+        Exception: On any other I/O or JSON decoding error.
+    """
     try:
         with open(name, "r", encoding="utf-8") as f:
             res_json = json.load(f)
@@ -56,6 +90,25 @@ def get_json_from_file(name: str) -> Any:
 
 
 def get_line_from_file(name: str) -> dict[tuple[str, str], int]:
+    """Read a BPE merges file and return the merge table.
+
+    The first line of the file is treated as a header and skipped.
+    Each subsequent line is expected to contain two space-separated
+    token strings representing a merge pair.
+
+    Args:
+        name: Path to the merges file (e.g. ``merges.txt``).
+
+    Returns:
+        A dictionary mapping ``(token_a, token_b)`` pairs to their
+        zero-based merge rank.
+
+    Raises:
+        FileNotFoundError: If *name* does not exist.
+        PermissionError: If the file cannot be read.
+        IsADirectoryError: If *name* points to a directory.
+        Exception: On any other I/O error.
+    """
     try:
         with open(name, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -82,6 +135,25 @@ def _predict_function_name(
     tokenizer: CustomTokenizer,
     schema: SchemaAwareValidator,
 ) -> str:
+    """Predict a function name using constrained greedy decoding.
+
+    At each step the decoder queries the schema trie for the set of
+    valid next characters, restricts the model's logits to tokens
+    whose decoded form is a valid continuation, and greedily picks
+    the highest-scoring candidate.  If the trie has a unique
+    completion the name is auto-completed without querying the model.
+
+    Args:
+        input_ids: Token ids accumulated so far (mutated in place).
+        model: Language model exposing a
+            ``get_logits_from_input_ids`` method.
+        tokenizer: The BPE tokenizer instance.
+        schema: The schema validator providing the name trie.
+
+    Returns:
+        The predicted function name string (without surrounding
+        quotes).
+    """
     current_name = ""
 
     while not schema.is_complete(current_name):
@@ -146,6 +218,27 @@ def _extract_parameter_value(
     model: Any,
     tokenizer: CustomTokenizer
 ) -> Any:
+    """Extract a single parameter value via greedy decoding.
+
+    Iteratively queries the model for the next token and accumulates
+    the decoded text until a delimiter or maximum step count is
+    reached.  Numeric values are parsed into ``int`` or ``float``;
+    string values are collected until a closing double-quote is
+    encountered.
+
+    Args:
+        input_ids: Token ids accumulated so far (mutated in place).
+        param_type: The expected parameter type (``"number"`` or
+            ``"string"``).
+        model: Language model exposing a
+            ``get_logits_from_input_ids`` method.
+        tokenizer: The BPE tokenizer instance.
+
+    Returns:
+        The extracted value: an ``int`` or ``float`` for numeric
+        types, or a ``str`` for string types.  Returns ``0.0`` if a
+        numeric value cannot be parsed.
+    """
     value_str = ""
     max_steps = 60
 
@@ -220,6 +313,29 @@ def generate_function_call(
     tokenizer: CustomTokenizer,
     schema: SchemaAwareValidator,
 ) -> dict:
+    """Generate a complete function-call JSON object.
+
+    Orchestrates the full constrained-decoding pipeline:
+
+    1. Build the chat-ML prompt and tokenise it.
+    2. Predict the function name via :func:`_predict_function_name`.
+    3. For each required parameter, extract its value via
+       :func:`_extract_parameter_value`.
+
+    Args:
+        prompt: The user's natural-language query.
+        functions_txt: A JSON-formatted string listing the available
+            functions.
+        model: Language model exposing a
+            ``get_logits_from_input_ids`` method.
+        tokenizer: The BPE tokenizer instance.
+        schema: The schema validator providing function metadata.
+
+    Returns:
+        A dictionary with keys ``"name"`` (str) and
+        ``"parameters"`` (dict) representing the generated function
+        call.
+    """
     prompt_txt = build_prompt(prompt, functions_txt)
     input_ids = tokenizer.encode(prompt_txt)
 
@@ -254,6 +370,13 @@ def generate_function_call(
 
 
 def main() -> None:
+    """Run the function-calling pipeline end-to-end.
+
+    Loads the model resources (merges, tokenizer, vocabulary),
+    reads the function definitions and input prompts, performs
+    constrained decoding for each prompt, and writes the results
+    to a JSON file.
+    """
     argv = get_argv()
     model = Small_LLM_Model()
     try:
