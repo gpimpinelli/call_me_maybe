@@ -1,21 +1,3 @@
-"""Utility helpers for prompt construction.
-
-This module provides helper functions used to build the chat-ML
-formatted prompt that is fed to the language model for function
-calling inference.
-"""
-
-# import numpy as np
-# def soft_max(logits: list[float]) -> np.ndarray:
-#     np_logits = np.array(logits)
-#     max_logit = np.max(np_logits)
-#     new_logits = np.exp(np_logits - max_logit)
-#     probability = new_logits / np.sum(new_logits)
-#     return probability
-# def get_logit_max(logits: np.ndarray) -> int:
-#     return int(np.argmax(logits))
-
-
 def build_prompt(user_prompt: str, functions_text: str) -> str:
     """Build a chat-ML formatted prompt for function-call generation.
 

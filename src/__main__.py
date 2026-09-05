@@ -1,12 +1,3 @@
-"""Entry point for the constrained function-calling pipeline.
-
-This module wires together the tokenizer, the language model, and the
-schema-aware validator to produce structured function-call JSON from
-natural-language prompts.  It can be executed directly via::
-
-    python -m src --input prompts.json --output results.json
-"""
-
 from typing import Any
 import sys
 import json
@@ -65,29 +56,9 @@ def get_json_from_file(name: str) -> Any:
 
     Returns:
         The deserialised JSON content (dict, list, etc.).
-
-    Raises:
-        FileNotFoundError: If *name* does not exist.
-        PermissionError: If the file cannot be read due to
-            insufficient permissions.
-        IsADirectoryError: If *name* points to a directory.
-        Exception: On any other I/O or JSON decoding error.
     """
-    try:
-        with open(name, "r", encoding="utf-8") as f:
-            res_json = json.load(f)
-    except FileNotFoundError as e:
-        raise FileNotFoundError(f"File not found: {e}") from e
-    except PermissionError as e:
-        raise PermissionError(
-            f"Permission denied: {e}") from e
-    except IsADirectoryError as e:
-        raise IsADirectoryError(
-            f"Path is a directory: {e}") from e
-    except Exception as e:
-        raise Exception(f"Unexpected error: {e}") from e
-    return res_json
-
+    with open(name, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 def get_line_from_file(name: str) -> dict[tuple[str, str], int]:
     """Read a BPE merges file and return the merge table.
@@ -103,25 +74,9 @@ def get_line_from_file(name: str) -> dict[tuple[str, str], int]:
         A dictionary mapping ``(token_a, token_b)`` pairs to their
         zero-based merge rank.
 
-    Raises:
-        FileNotFoundError: If *name* does not exist.
-        PermissionError: If the file cannot be read.
-        IsADirectoryError: If *name* points to a directory.
-        Exception: On any other I/O error.
     """
-    try:
-        with open(name, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except FileNotFoundError as e:
-        raise FileNotFoundError(f"File not found: {e}") from e
-    except PermissionError as e:
-        raise PermissionError(
-            f"Permission denied: {e}") from e
-    except IsADirectoryError as e:
-        raise IsADirectoryError(
-            f"Path is a directory: {e}") from e
-    except Exception as e:
-        raise Exception(f"Error: {e}") from e
+    with open(name, "r", encoding="utf-8") as f:
+        lines = f.readlines()
     res = {}
     for rank, line in enumerate(lines[1:]):
         part = line.split()
@@ -173,26 +128,17 @@ def _predict_function_name(
         best_score = float("-inf")
 
         for char in allowed_chars:
-            candidate_ids = (
-                tokenizer.get_tokens_starting_with(char)
-                if hasattr(tokenizer, "get_tokens_starting_with")
-                else []
-            )
-            if not candidate_ids:
-                decoded_dict = getattr(tokenizer, "decoded_tokens", {})
-                candidate_ids = [
-                    tid
-                    for tid, s in decoded_dict.items()
-                    if s.startswith(char)
-                ]
+            candidate_ids = tokenizer.get_tokens_starting_with(char)
 
+            base_node = schema.name_trie
+            for c in current_name:
+                base_node = base_node[c]
             for tid in candidate_ids:
                 tok_str = tokenizer.decode(tid)
-                trial = current_name + tok_str
-                node = schema.name_trie
+                node = base_node
                 valid_token = True
 
-                for c in trial:
+                for c in tok_str:
                     if c not in node:
                         valid_token = False
                         break
@@ -211,6 +157,7 @@ def _predict_function_name(
 
     return current_name.strip('"')
 
+_DIGITS_AND_SIGNS = frozenset("0123456789.-")
 
 def _extract_parameter_value(
     input_ids: list[int],
@@ -222,9 +169,12 @@ def _extract_parameter_value(
 
     Iteratively queries the model for the next token and accumulates
     the decoded text until a delimiter or maximum step count is
-    reached.  Numeric values are parsed into ``int`` or ``float``;
-    string values are collected until a closing double-quote is
-    encountered.
+    reached.  For numeric types the search is restricted to tokens
+    composed of digits, dots, and minus signs (using the pre-built
+    ``decoded_tokens`` cache for efficiency).  For string types,
+    tokens containing a double-quote are tracked separately; the
+    string terminates when the best quote-bearing token scores
+    higher than the best non-quote token.
 
     Args:
         input_ids: Token ids accumulated so far (mutated in place).
@@ -241,8 +191,7 @@ def _extract_parameter_value(
     """
     value_str = ""
     max_steps = 60
-
-    DIGITS_AND_SIGNS = set("0123456789.-")
+    decoded = tokenizer.decoded_tokens
 
     for _ in range(max_steps):
         logits = model.get_logits_from_input_ids(input_ids)
@@ -250,15 +199,16 @@ def _extract_parameter_value(
         best_score = float("-inf")
 
         if param_type == "number":
-            for tid in range(len(logits)):
-                tok_str = tokenizer.decode(tid)
+            for tid, tok_str in decoded.items():
+                if tid >= len(logits):
+                    continue
 
                 if tok_str in (",", "}", " ", "\n") and len(value_str) > 0:
                     if logits[tid] > best_score:
                         best_score = logits[tid]
                         best_id = tid
 
-                elif (all(c in DIGITS_AND_SIGNS for c in tok_str) and
+                elif (all(c in _DIGITS_AND_SIGNS for c in tok_str) and
                         len(tok_str) > 0):
                     if logits[tid] > best_score:
                         best_score = logits[tid]
@@ -274,29 +224,31 @@ def _extract_parameter_value(
             input_ids.append(best_id)
 
         elif param_type == "string":
-
+            best_quote_id = None
+            best_quote_score = float("-inf")
             for tid in range(len(logits)):
                 tok_str = tokenizer.decode(tid)
                 if '"' in tok_str:
-                    if logits[tid] > best_score:
-                        best_score = logits[tid]
-                        best_id = tid
+                    if logits[tid] > best_quote_score:
+                        best_quote_score = logits[tid]
+                        best_quote_id = tid
                 else:
                     if logits[tid] > best_score:
                         best_score = logits[tid]
                         best_id = tid
 
-            if best_id is None:
+            if best_id is None and best_quote_id is None:
                 break
 
-            chosen = tokenizer.decode(best_id)
-            if '"' in chosen:
+            if best_quote_id is not None and best_quote_score > best_score:
+                chosen = tokenizer.decode(best_quote_id)
                 value_str += chosen.split('"')[0]
                 break
-            value_str += chosen
-            input_ids.append(best_id)
-        else:
-            break
+
+            if best_id is not None:
+                chosen = tokenizer.decode(best_id)
+                value_str += chosen
+                input_ids.append(best_id)
 
     if param_type == "number":
         try:

@@ -34,11 +34,6 @@ class CustomTokenizer(BaseModel):
             strings to their merge rank.
         special_token_id: Mapping from special token strings to
             their integer ids.
-        tokens_by_first_char: Index mapping a leading character to
-            the list of token ids whose decoded string starts with
-            that character.
-        decoded_tokens: Cache mapping token ids to their decoded
-            string representations.
     """
 
     SPLIT_REGEX: ClassVar[re.Pattern] = re.compile(
@@ -59,8 +54,8 @@ class CustomTokenizer(BaseModel):
     _byte_encoder: dict[int, str] = PrivateAttr(default_factory=dict)
     _byte_decoder: dict[str, int] = PrivateAttr(default_factory=dict)
     _special_split_regex: re.Pattern | None = PrivateAttr(default=None)
-    tokens_by_first_char: dict[str, list[int]] = Field(default_factory=dict)
-    decoded_tokens: dict[int, str] = Field(default_factory=dict)
+    _tokens_by_first_char: dict[str, list[int]] = PrivateAttr(default_factory=dict)
+    _decoded_tokens: dict[int, str] = PrivateAttr(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -119,16 +114,26 @@ class CustomTokenizer(BaseModel):
         """Return the reverse special-token map (id -> token string)."""
         return self._special_id_token
 
+    @property
+    def decoded_tokens(self) -> dict[int, str]:
+        """Return the cached decoded-token map (id -> string)."""
+        return self._decoded_tokens
+
+    @property
+    def tokens_by_first_char(self) -> dict[str, list[int]]:
+        """Return the first-character token index."""
+        return self._tokens_by_first_char
+
     def _init_dfa_cache(self) -> None:
         """Build the per-first-character token index.
 
         Iterates over every non-special token, decodes it, and
         records the mapping ``first_char -> [token_id, ...]`` in
-        ``tokens_by_first_char``.  Tokens that cannot be decoded or
+        ``_tokens_by_first_char``.  Tokens that cannot be decoded or
         that contain the Unicode replacement character are skipped.
         """
-        self.tokens_by_first_char = {}
-        self.decoded_tokens = {}
+        self._tokens_by_first_char = {}
+        self._decoded_tokens = {}
         for id_ in self._id_token:
             if id_ in self.special_id_token:
                 continue
@@ -139,11 +144,11 @@ class CustomTokenizer(BaseModel):
             if not decoded or "\ufffd" in decoded:
                 continue
 
-            self.decoded_tokens[id_] = decoded
+            self._decoded_tokens[id_] = decoded
             first_char = decoded[0]
-            if first_char not in self.tokens_by_first_char:
-                self.tokens_by_first_char[first_char] = []
-            self.tokens_by_first_char[first_char].append(id_)
+            if first_char not in self._tokens_by_first_char:
+                self._tokens_by_first_char[first_char] = []
+            self._tokens_by_first_char[first_char].append(id_)
 
     def get_tokens_starting_with(self, char: str) -> list[int]:
         """Return token ids whose decoded form starts with *char*.
@@ -155,7 +160,7 @@ class CustomTokenizer(BaseModel):
             A list of token ids (possibly empty) whose decoded
             representation begins with *char*.
         """
-        return self.tokens_by_first_char.get(char, [])
+        return self._tokens_by_first_char.get(char, [])
 
     def get_decoded_token(self, id_: int) -> str:
         """Return the cached decoded string for a token id.
@@ -167,7 +172,7 @@ class CustomTokenizer(BaseModel):
             The decoded string, or an empty string if *id_* is not
             present in the cache.
         """
-        return self.decoded_tokens.get(id_, "")
+        return self._decoded_tokens.get(id_, "")
 
     def _bytes_to_unicode(self) -> dict[int, str]:
         """Create a byte-to-unicode mapping (GPT-2 style).
