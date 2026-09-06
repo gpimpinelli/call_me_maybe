@@ -1,3 +1,5 @@
+"""Utility functions for CLI parsing, file loading, and prompt building."""
+
 import argparse
 import json
 from typing import Any
@@ -7,12 +9,10 @@ def get_argv() -> argparse.Namespace:
     """Parse and return command-line arguments.
 
     Returns:
-        An :class:`argparse.Namespace` with the following attributes:
-
-        * ``functions_definition`` -- path to the functions-definition
-          JSON file.
-        * ``input`` -- path to the input prompts JSON file.
-        * ``output`` -- path (file or directory) for the results.
+        argparse.Namespace: Parsed command-line arguments containing:
+            functions_definition: Path to functions-definition JSON file.
+            input: Path to the input prompts JSON file.
+            output: Path (file or directory) for the results.
     """
     parser = argparse.ArgumentParser(description="Function calling in LLMs")
     parser.add_argument(
@@ -58,7 +58,6 @@ def get_line_from_file(name: str) -> dict[tuple[str, str], int]:
     Returns:
         A dictionary mapping ``(token_a, token_b)`` pairs to their
         zero-based merge rank.
-
     """
     with open(name, "r", encoding="utf-8") as f:
         lines = f.readlines()
@@ -87,7 +86,8 @@ def build_prompt(user_prompt: str, functions_text: str) -> str:
         fed to the language model.
     """
     return (
-        "<|im_start|>system\nYou are a function calling assistant.\n"
+        "<|im_start|>system\n"
+        "You are a function calling assistant.\n"
         f"Available functions:\n{functions_text}<|im_end|>\n"
         f"<|im_start|>user\n{user_prompt}\n"
         "Respond only with a JSON object with keys 'name' "

@@ -1,3 +1,5 @@
+"""Main entry point for function-calling with constrained decoding."""
+
 from typing import Any
 import sys
 import json
@@ -27,7 +29,21 @@ def _predict_function_name(
     schema: SchemaAwareValidator,
     max_steps: int = 50,
 ) -> str:
-    """Predict a function name using constrained greedy decoding."""
+    """Predict a function name using constrained greedy decoding.
+
+    Constrains the model logits at each decoding step to only allow
+    characters that form valid function names in the schema trie.
+
+    Args:
+        input_ids: List of prompt token IDs to be extended.
+        model: Language model instance providing next-token logits.
+        tokenizer: Custom tokenizer used for encoding and decoding.
+        schema: Schema validator containing the function name trie.
+        max_steps: Maximum number of generation steps.
+
+    Returns:
+        The predicted function name string without surrounding quotes.
+    """
     current_name = ""
 
     for _ in range(max_steps):
@@ -53,7 +69,7 @@ def _predict_function_name(
 
         for char in allowed_chars:
             for tid in tokenizer.get_tokens_starting_with(char):
-                # NOTA: usa la cache invece di ridecodificare
+                # NOTE: use cache instead of re-decoding
                 tok_str = tokenizer.get_decoded_token(tid)
 
                 node = base_node
@@ -85,12 +101,27 @@ def _extract_parameter_value(
     tokenizer: CustomTokenizer,
     max_steps: int = 60,
 ) -> Any:
-    """Extract a single parameter value via greedy decoding (vettorizzato)."""
+    """Extract a single parameter value via greedy decoding.
+
+    Uses precomputed token masks to constrain decoding based on whether
+    the parameter is a number or a string.
+
+    Args:
+        input_ids: List of prompt token IDs extended in place.
+        param_type: Expected schema parameter type ("number" or "string").
+        model: Language model instance providing next-token logits.
+        tokenizer: Custom tokenizer used for encoding and decoding.
+        max_steps: Maximum number of decoding steps.
+
+    Returns:
+        The extracted parameter value (float or int for numbers, str for
+        strings).
+    """
     value_str = ""
 
     if param_type == "number":
-        digit_ids = tokenizer.digit_token_ids  # precalcolato UNA volta
-        delim_ids = tokenizer.delimiter_token_ids  # precalcolato UNA volta
+        digit_ids = tokenizer.digit_token_ids  # precomputed once
+        delim_ids = tokenizer.delimiter_token_ids  # precomputed once
 
         for _ in range(max_steps):
             logits = np.asarray(model.get_logits_from_input_ids(input_ids))
@@ -125,8 +156,8 @@ def _extract_parameter_value(
             return 0.0
 
     elif param_type == "string":
-        quote_ids = tokenizer.quote_token_ids  # precalcolato UNA volta
-        non_quote_ids = tokenizer.non_quote_token_ids  # precalcolato UNA volta
+        quote_ids = tokenizer.quote_token_ids  # precomputed once
+        non_quote_ids = tokenizer.non_quote_token_ids  # precomputed once
 
         for _ in range(max_steps):
             logits = np.asarray(model.get_logits_from_input_ids(input_ids))
@@ -238,10 +269,12 @@ def generate_function_call(
 def main() -> None:
     """Run the function-calling pipeline end-to-end.
 
-    Loads the model resources (merges, tokenizer, vocabulary),
-    reads the function definitions and input prompts, performs
-    constrained decoding for each prompt, and writes the results
-    to a JSON file.
+    Loads model resources, reads function definitions and input prompts,
+    executes constrained decoding for each prompt, and writes the
+    resulting JSON output.
+
+    Returns:
+        None.
     """
     argv = get_argv()
     model = Small_LLM_Model()

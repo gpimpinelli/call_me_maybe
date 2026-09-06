@@ -146,22 +146,22 @@ class CustomTokenizer(BaseModel):
 
     @property
     def digit_token_ids(self) -> "np.ndarray":
-        """Token ids composti solo da cifre/segno/punto (precalcolati)."""
+        """Return precomputed token IDs composed of digits, signs, or dot."""
         return self._digit_token_ids
 
     @property
     def delimiter_token_ids(self) -> "np.ndarray":
-        """Token ids che rappresentano i delimitatori numerici(precalcolati)"""
+        """Return precomputed token IDs representing numeric delimiters."""
         return self._delimiter_token_ids
 
     @property
     def quote_token_ids(self) -> "np.ndarray":
-        """Token ids contenenti una virgoletta (precalcolati)."""
+        """Return precomputed token IDs containing a quote character."""
         return self._quote_token_ids
 
     @property
     def non_quote_token_ids(self) -> "np.ndarray":
-        """Token ids senza virgoletta (precalcolati)."""
+        """Return precomputed token IDs without a quote character."""
         return self._non_quote_token_ids
 
     def _init_dfa_cache(self) -> None:
