@@ -7,7 +7,7 @@ run:
 	HF_TOKEN=$(HF_TOKEN) uv run python -m src
 
 debug:
-	time uv run python -m src
+	uv run python -m pdb -m src
 
 clean:
 	rm -rf */__pycache__ */.mypy_cache data/output/

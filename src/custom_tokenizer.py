@@ -7,9 +7,13 @@ cache that maps each leading character to the set of token ids whose
 decoded form starts with that character.
 """
 
-from pydantic import BaseModel, Field, model_validator, PrivateAttr
+from pydantic import BaseModel, model_validator, PrivateAttr
 import re
+import numpy as np
 from typing import Any, ClassVar
+
+_DIGITS_AND_SIGNS = frozenset("0123456789.-")
+_NUMBER_DELIMITERS = frozenset({",", "}", " ", "\n"})
 
 
 class CustomTokenizer(BaseModel):
@@ -36,7 +40,7 @@ class CustomTokenizer(BaseModel):
             their integer ids.
     """
 
-    SPLIT_REGEX: ClassVar[re.Pattern] = re.compile(
+    SPLIT_REGEX: ClassVar[re.Pattern[str]] = re.compile(
         r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)"""
         r"""|[^\r\n\w]?[^\W\d_]+"""
         r"""|\d"""
@@ -52,10 +56,26 @@ class CustomTokenizer(BaseModel):
     _id_token: dict[int, str] = PrivateAttr(default_factory=dict)
     _special_id_token: dict[int, Any] = PrivateAttr(default_factory=dict)
     _byte_encoder: dict[int, str] = PrivateAttr(default_factory=dict)
-    _byte_decoder: dict[str, int] = PrivateAttr(default_factory=dict)
-    _special_split_regex: re.Pattern | None = PrivateAttr(default=None)
-    _tokens_by_first_char: dict[str, list[int]] = PrivateAttr(default_factory=dict)
+    _byte_decoder: dict[str, int] = PrivateAttr(
+        default_factory=dict
+    )
+    _special_split_regex: re.Pattern[str] | None = PrivateAttr(default=None)
+    _tokens_by_first_char: dict[str, list[int]] = PrivateAttr(
+        default_factory=dict
+    )
     _decoded_tokens: dict[int, str] = PrivateAttr(default_factory=dict)
+    _digit_token_ids: "np.ndarray" = PrivateAttr(
+        default_factory=lambda: np.array([], dtype=np.int64)
+    )
+    _delimiter_token_ids: "np.ndarray" = PrivateAttr(
+        default_factory=lambda: np.array([], dtype=np.int64)
+    )
+    _quote_token_ids: "np.ndarray" = PrivateAttr(
+        default_factory=lambda: np.array([], dtype=np.int64)
+    )
+    _non_quote_token_ids: "np.ndarray" = PrivateAttr(
+        default_factory=lambda: np.array([], dtype=np.int64)
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -124,6 +144,26 @@ class CustomTokenizer(BaseModel):
         """Return the first-character token index."""
         return self._tokens_by_first_char
 
+    @property
+    def digit_token_ids(self) -> "np.ndarray":
+        """Token ids composti solo da cifre/segno/punto (precalcolati)."""
+        return self._digit_token_ids
+
+    @property
+    def delimiter_token_ids(self) -> "np.ndarray":
+        """Token ids che rappresentano i delimitatori numerici(precalcolati)"""
+        return self._delimiter_token_ids
+
+    @property
+    def quote_token_ids(self) -> "np.ndarray":
+        """Token ids contenenti una virgoletta (precalcolati)."""
+        return self._quote_token_ids
+
+    @property
+    def non_quote_token_ids(self) -> "np.ndarray":
+        """Token ids senza virgoletta (precalcolati)."""
+        return self._non_quote_token_ids
+
     def _init_dfa_cache(self) -> None:
         """Build the per-first-character token index.
 
@@ -149,6 +189,23 @@ class CustomTokenizer(BaseModel):
             if first_char not in self._tokens_by_first_char:
                 self._tokens_by_first_char[first_char] = []
             self._tokens_by_first_char[first_char].append(id_)
+
+        digit_ids, delim_ids, quote_ids, non_quote_ids = [], [], [], []
+        for tid, tok_str in self._decoded_tokens.items():
+            if tok_str in _NUMBER_DELIMITERS:
+                delim_ids.append(tid)
+            elif tok_str and all(c in _DIGITS_AND_SIGNS for c in tok_str):
+                digit_ids.append(tid)
+
+            if '"' in tok_str:
+                quote_ids.append(tid)
+            else:
+                non_quote_ids.append(tid)
+
+        self._digit_token_ids = np.array(digit_ids, dtype=np.int64)
+        self._delimiter_token_ids = np.array(delim_ids, dtype=np.int64)
+        self._quote_token_ids = np.array(quote_ids, dtype=np.int64)
+        self._non_quote_token_ids = np.array(non_quote_ids, dtype=np.int64)
 
     def get_tokens_starting_with(self, char: str) -> list[int]:
         """Return token ids whose decoded form starts with *char*.
@@ -245,8 +302,10 @@ class CustomTokenizer(BaseModel):
                     new_word = []
                     i = 0
                     while i < len(chars):
-                        if (i < len(chars) - 1 and
-                                (chars[i], chars[i + 1]) == best_pair):
+                        if (
+                            i < len(chars) - 1 and
+                            (chars[i], chars[i + 1]) == best_pair
+                        ):
                             new_word.append(chars[i] + chars[i + 1])
                             i += 2
                         else:

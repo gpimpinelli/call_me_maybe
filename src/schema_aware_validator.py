@@ -15,7 +15,9 @@ from typing import Any
 from pydantic import BaseModel, PrivateAttr
 
 
-def validate_functions_definition(json_functions: list) -> None:
+def validate_functions_definition(
+    json_functions: list[dict[str, Any]]
+) -> None:
     """Validate the structure of a function-definition list.
 
     Each element must be a dictionary containing at least the keys
@@ -78,9 +80,11 @@ class SchemaAwareValidator(BaseModel):
         json_functions: The raw list of function-definition dicts.
     """
 
-    json_functions: list[dict]
-    _function_by_name: dict[str, dict] = PrivateAttr(default_factory=dict)
-    _name_trie: dict[str, Any] = PrivateAttr(default_factory=dict)
+    json_functions: list[dict[str, Any]]
+    _function_by_name: dict[str, dict[str, Any]] = PrivateAttr(
+        default_factory=dict
+    )
+    _name_trie: dict[str | None, Any] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context: Any) -> None:
         """Finish initialisation after Pydantic validation.
@@ -95,19 +99,19 @@ class SchemaAwareValidator(BaseModel):
         self._function_by_name = {f["name"]: f for f in self.json_functions}
         self._name_trie = self._init_trie(
             [f["name"] for f in self.json_functions]
-            )
+        )
 
     @property
-    def name_trie(self) -> dict[str, Any]:
+    def name_trie(self) -> dict[str | None, Any]:
         """Return the character-level trie over function names."""
         return self._name_trie
 
     @property
-    def function_by_name(self) -> dict[str, dict]:
+    def function_by_name(self) -> dict[str, dict[str, Any]]:
         """Return the function-definition index keyed by name."""
         return self._function_by_name
 
-    def _init_trie(self, words: list[str]) -> dict:
+    def _init_trie(self, words: list[str]) -> dict[str | None, Any]:
         """Build a character-level trie from a list of words.
 
         Each leaf stores the sentinel key ``None`` mapped to the
@@ -119,7 +123,7 @@ class SchemaAwareValidator(BaseModel):
         Returns:
             A nested dictionary representing the trie.
         """
-        trie: dict = {}
+        trie: dict[str | None, Any] = {}
         for word in words:
             node = trie
             for char in word:
@@ -128,7 +132,7 @@ class SchemaAwareValidator(BaseModel):
         return trie
 
     @staticmethod
-    def _walk_trie(trie: dict[str, Any], partial: str) -> set[str]:
+    def _walk_trie(trie: dict[str | None, Any], partial: str) -> set[str]:
         """Return the set of valid next characters for *partial*.
 
         Traverses *trie* according to the characters in *partial*
@@ -150,7 +154,9 @@ class SchemaAwareValidator(BaseModel):
         return {c for c in node if c is not None}
 
     @staticmethod
-    def _is_complete_in_trie(trie: dict[str, Any], partial: str) -> bool:
+    def _is_complete_in_trie(
+        trie: dict[str | None, Any], partial: str
+    ) -> bool:
         """Check whether *partial* is a complete word in the trie.
 
         Args:
@@ -170,7 +176,9 @@ class SchemaAwareValidator(BaseModel):
         return None in node
 
     @staticmethod
-    def _unique_completion(trie: dict[str, Any], partial: str) -> str | None:
+    def _unique_completion(
+        trie: dict[str | None, Any], partial: str
+    ) -> str | None:
         """Return the unique completion suffix if one exists.
 
         Given the prefix *partial*, if there is exactly one way to

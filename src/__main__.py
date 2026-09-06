@@ -1,10 +1,12 @@
 from typing import Any
 import sys
 import json
-import argparse
 import os
+import numpy as np
 from .custom_tokenizer import CustomTokenizer
-from .utils import build_prompt
+from .utils import (
+    build_prompt, get_argv, get_json_from_file, get_line_from_file
+)
 from .schema_aware_validator import SchemaAwareValidator
 
 try:
@@ -18,100 +20,20 @@ except ModuleNotFoundError as e:
     sys.exit(1)
 
 
-def get_argv() -> argparse.Namespace:
-    """Parse and return command-line arguments.
-
-    Returns:
-        An :class:`argparse.Namespace` with the following attributes:
-
-        * ``functions_definition`` -- path to the functions-definition
-          JSON file.
-        * ``input`` -- path to the input prompts JSON file.
-        * ``output`` -- path (file or directory) for the results.
-    """
-    parser = argparse.ArgumentParser(description="Function calling in LLMs")
-    parser.add_argument(
-        "--functions_definition",
-        default="data/input/functions_definition.json",
-        help="Path to functions definition file",
-    )
-    parser.add_argument(
-        "--input",
-        default="data/input/function_calling_tests.json",
-        help="Path to input file",
-    )
-    parser.add_argument(
-        "--output",
-        default="data/output",
-        help="Path of the function to be return"
-    )
-    return parser.parse_args()
-
-
-def get_json_from_file(name: str) -> Any:
-    """Read and parse a JSON file.
-
-    Args:
-        name: Path to the JSON file to read.
-
-    Returns:
-        The deserialised JSON content (dict, list, etc.).
-    """
-    with open(name, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def get_line_from_file(name: str) -> dict[tuple[str, str], int]:
-    """Read a BPE merges file and return the merge table.
-
-    The first line of the file is treated as a header and skipped.
-    Each subsequent line is expected to contain two space-separated
-    token strings representing a merge pair.
-
-    Args:
-        name: Path to the merges file (e.g. ``merges.txt``).
-
-    Returns:
-        A dictionary mapping ``(token_a, token_b)`` pairs to their
-        zero-based merge rank.
-
-    """
-    with open(name, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    res = {}
-    for rank, line in enumerate(lines[1:]):
-        part = line.split()
-        res[(part[0], part[1])] = rank
-    return res
-
-
 def _predict_function_name(
     input_ids: list[int],
     model: Any,
     tokenizer: CustomTokenizer,
     schema: SchemaAwareValidator,
+    max_steps: int = 50,
 ) -> str:
-    """Predict a function name using constrained greedy decoding.
-
-    At each step the decoder queries the schema trie for the set of
-    valid next characters, restricts the model's logits to tokens
-    whose decoded form is a valid continuation, and greedily picks
-    the highest-scoring candidate.  If the trie has a unique
-    completion the name is auto-completed without querying the model.
-
-    Args:
-        input_ids: Token ids accumulated so far (mutated in place).
-        model: Language model exposing a
-            ``get_logits_from_input_ids`` method.
-        tokenizer: The BPE tokenizer instance.
-        schema: The schema validator providing the name trie.
-
-    Returns:
-        The predicted function name string (without surrounding
-        quotes).
-    """
+    """Predict a function name using constrained greedy decoding."""
     current_name = ""
 
-    while not schema.is_complete(current_name):
+    for _ in range(max_steps):
+        if schema.is_complete(current_name):
+            break
+
         forced = schema.get_unique_completion_for_name(current_name)
         if forced:
             current_name += forced
@@ -119,25 +41,23 @@ def _predict_function_name(
             break
 
         allowed_chars = schema.next_char_for_name(current_name)
-        if schema.is_complete(current_name):
-            allowed_chars.add('"')
 
         logits = model.get_logits_from_input_ids(input_ids)
 
         best_id = None
         best_score = float("-inf")
 
-        for char in allowed_chars:
-            candidate_ids = tokenizer.get_tokens_starting_with(char)
+        base_node = schema.name_trie
+        for c in current_name:
+            base_node = base_node[c]
 
-            base_node = schema.name_trie
-            for c in current_name:
-                base_node = base_node[c]
-            for tid in candidate_ids:
-                tok_str = tokenizer.decode(tid)
+        for char in allowed_chars:
+            for tid in tokenizer.get_tokens_starting_with(char):
+                # NOTA: usa la cache invece di ridecodificare
+                tok_str = tokenizer.get_decoded_token(tid)
+
                 node = base_node
                 valid_token = True
-
                 for c in tok_str:
                     if c not in node:
                         valid_token = False
@@ -151,111 +71,105 @@ def _predict_function_name(
         if best_id is None:
             break
 
-        chosen_str = tokenizer.decode(best_id)
+        chosen_str = tokenizer.get_decoded_token(best_id)
         current_name += chosen_str
         input_ids.append(best_id)
 
     return current_name.strip('"')
 
-_DIGITS_AND_SIGNS = frozenset("0123456789.-")
 
 def _extract_parameter_value(
     input_ids: list[int],
     param_type: str,
     model: Any,
-    tokenizer: CustomTokenizer
+    tokenizer: CustomTokenizer,
+    max_steps: int = 60,
 ) -> Any:
-    """Extract a single parameter value via greedy decoding.
-
-    Iteratively queries the model for the next token and accumulates
-    the decoded text until a delimiter or maximum step count is
-    reached.  For numeric types the search is restricted to tokens
-    composed of digits, dots, and minus signs (using the pre-built
-    ``decoded_tokens`` cache for efficiency).  For string types,
-    tokens containing a double-quote are tracked separately; the
-    string terminates when the best quote-bearing token scores
-    higher than the best non-quote token.
-
-    Args:
-        input_ids: Token ids accumulated so far (mutated in place).
-        param_type: The expected parameter type (``"number"`` or
-            ``"string"``).
-        model: Language model exposing a
-            ``get_logits_from_input_ids`` method.
-        tokenizer: The BPE tokenizer instance.
-
-    Returns:
-        The extracted value: an ``int`` or ``float`` for numeric
-        types, or a ``str`` for string types.  Returns ``0.0`` if a
-        numeric value cannot be parsed.
-    """
+    """Extract a single parameter value via greedy decoding (vettorizzato)."""
     value_str = ""
-    max_steps = 60
-    decoded = tokenizer.decoded_tokens
 
-    for _ in range(max_steps):
-        logits = model.get_logits_from_input_ids(input_ids)
-        best_id = None
-        best_score = float("-inf")
+    if param_type == "number":
+        digit_ids = tokenizer.digit_token_ids  # precalcolato UNA volta
+        delim_ids = tokenizer.delimiter_token_ids  # precalcolato UNA volta
 
-        if param_type == "number":
-            for tid, tok_str in decoded.items():
-                if tid >= len(logits):
-                    continue
+        for _ in range(max_steps):
+            logits = np.asarray(model.get_logits_from_input_ids(input_ids))
 
-                if tok_str in (",", "}", " ", "\n") and len(value_str) > 0:
-                    if logits[tid] > best_score:
-                        best_score = logits[tid]
-                        best_id = tid
+            best_id = None
+            best_score = float("-inf")
 
-                elif (all(c in _DIGITS_AND_SIGNS for c in tok_str) and
-                        len(tok_str) > 0):
-                    if logits[tid] > best_score:
-                        best_score = logits[tid]
-                        best_id = tid
+            if len(value_str) > 0 and delim_ids.size:
+                idx = delim_ids[np.argmax(logits[delim_ids])]
+                score = logits[idx]
+                if score > best_score:
+                    best_score, best_id = score, int(idx)
+
+            if digit_ids.size:
+                idx = digit_ids[np.argmax(logits[digit_ids])]
+                score = logits[idx]
+                if score > best_score:
+                    best_score, best_id = score, int(idx)
 
             if best_id is None:
                 break
 
-            chosen = tokenizer.decode(best_id)
+            chosen = tokenizer.get_decoded_token(best_id)
             if chosen in (",", "}", " ", "\n"):
                 break
             value_str += chosen
             input_ids.append(best_id)
 
-        elif param_type == "string":
-            best_quote_id = None
-            best_quote_score = float("-inf")
-            for tid in range(len(logits)):
-                tok_str = tokenizer.decode(tid)
-                if '"' in tok_str:
-                    if logits[tid] > best_quote_score:
-                        best_quote_score = logits[tid]
-                        best_quote_id = tid
-                else:
-                    if logits[tid] > best_score:
-                        best_score = logits[tid]
-                        best_id = tid
+        try:
+            return float(value_str) if "." in value_str else int(value_str)
+        except ValueError:
+            return 0.0
+
+    elif param_type == "string":
+        quote_ids = tokenizer.quote_token_ids  # precalcolato UNA volta
+        non_quote_ids = tokenizer.non_quote_token_ids  # precalcolato UNA volta
+
+        for _ in range(max_steps):
+            logits = np.asarray(model.get_logits_from_input_ids(input_ids))
+            best_quote_id = (
+                int(quote_ids[np.argmax(logits[quote_ids])])
+                if quote_ids.size
+                else None
+            )
+            best_quote_score = (
+                logits[best_quote_id]
+                if best_quote_id is not None
+                else float("-inf")
+            )
+
+            best_id = (
+                int(non_quote_ids[np.argmax(logits[non_quote_ids])])
+                if non_quote_ids.size
+                else None
+            )
+            best_score = (
+                logits[best_id]
+                if best_id is not None
+                else float("-inf")
+            )
 
             if best_id is None and best_quote_id is None:
                 break
 
             if best_quote_id is not None and best_quote_score > best_score:
-                chosen = tokenizer.decode(best_quote_id)
+                chosen = tokenizer.get_decoded_token(best_quote_id)
                 value_str += chosen.split('"')[0]
                 break
 
-            if best_id is not None:
-                chosen = tokenizer.decode(best_id)
-                value_str += chosen
-                input_ids.append(best_id)
+            if best_id is None:
+                break
 
-    if param_type == "number":
-        try:
-            return float(value_str) if "." in value_str else int(value_str)
-        except ValueError:
-            return 0.0
-    return value_str
+            chosen = tokenizer.get_decoded_token(best_id)
+            value_str += chosen
+            input_ids.append(best_id)
+
+        return value_str.strip()
+
+    return ""
 
 
 def generate_function_call(
@@ -264,7 +178,7 @@ def generate_function_call(
     model: Any,
     tokenizer: CustomTokenizer,
     schema: SchemaAwareValidator,
-) -> dict:
+) -> dict[str, Any]:
     """Generate a complete function-call JSON object.
 
     Orchestrates the full constrained-decoding pipeline:
@@ -354,7 +268,9 @@ def main() -> None:
         dict_merge=dict_merge,
         special_token_id=json_tokenizer["added_tokens"],
     )
-    function_txt = json.dumps(schema.json_functions, indent=2)
+    function_txt = "\n".join(
+        f'{f["name"]}: {f["description"]}' for f in schema.json_functions
+    )
     results = []
     for p in json_prompts:
         prompt_text = p.get("prompt", "") if isinstance(p, dict) else p
@@ -387,7 +303,5 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt as e:
-        print(f"KeyboardInterrupt: {e}")
-    except EOFError as e:
-        print(f"EOFError: {e}")
+    except Exception as e:
+        print(f"{e}")
