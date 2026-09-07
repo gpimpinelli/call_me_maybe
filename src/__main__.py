@@ -69,7 +69,6 @@ def _predict_function_name(
 
         for char in allowed_chars:
             for tid in tokenizer.get_tokens_starting_with(char):
-                # NOTE: use cache instead of re-decoding
                 tok_str = tokenizer.get_decoded_token(tid)
 
                 node = base_node
@@ -120,8 +119,8 @@ def _extract_parameter_value(
     value_str = ""
 
     if param_type == "number":
-        digit_ids = tokenizer.digit_token_ids  # precomputed once
-        delim_ids = tokenizer.delimiter_token_ids  # precomputed once
+        digit_ids = tokenizer.digit_token_ids
+        delim_ids = tokenizer.delimiter_token_ids
 
         for _ in range(max_steps):
             logits = np.asarray(model.get_logits_from_input_ids(input_ids))
@@ -156,8 +155,8 @@ def _extract_parameter_value(
             return 0.0
 
     elif param_type == "string":
-        quote_ids = tokenizer.quote_token_ids  # precomputed once
-        non_quote_ids = tokenizer.non_quote_token_ids  # precomputed once
+        quote_ids = tokenizer.quote_token_ids
+        non_quote_ids = tokenizer.non_quote_token_ids
 
         for _ in range(max_steps):
             logits = np.asarray(model.get_logits_from_input_ids(input_ids))
@@ -302,7 +301,7 @@ def main() -> None:
         special_token_id=json_tokenizer["added_tokens"],
     )
     function_txt = "\n".join(
-        f'{f["name"]}: {f["description"]}' for f in schema.json_functions
+        f'{f["name"]}: {f["description"], ["parameter"]}' for f in schema.json_functions
     )
     results = []
     for p in json_prompts:
